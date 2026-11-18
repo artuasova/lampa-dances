@@ -12,7 +12,9 @@
 
     var DEFAULT_URL = 'https://disk.yandex.ru/d/L4PW93XuLMuu3A';
     var API = 'https://cloud-api.yandex.net/v1/disk/public/resources';
-    var CACHE_TTL = 5 * 60 * 1000;
+    var CACHE_TTL = 10 * 60 * 1000;
+    var SEARCH_LIMIT = 300;
+    var SEARCH_DEPTH = 6;
 
     function log() {
         try { console.log.apply(console, ['[Dances]'].concat([].slice.call(arguments))); } catch (e) {}
@@ -56,6 +58,11 @@
         return String(a).localeCompare(String(b), 'ru', { numeric: true, sensitivity: 'base' });
     }
 
+    function dirOf(path) {
+        var i = String(path || '').lastIndexOf('/');
+        return i > 0 ? String(path).slice(0, i) : '/';
+    }
+
     // ---------- кэш ----------
     function cacheGet(key) {
         try {
@@ -85,6 +92,24 @@
         } catch (e) { log('cache clear error', e); }
     }
 
+    function listingKey(base, path) {
+        return base + '|' + path + '|' + (previewsOn() ? 'p' : 'n');
+    }
+
+    function fetchList(base, path, cb) {
+        var key = listingKey(base, path);
+        var cached = cacheGet(key);
+        if (cached) { cb(cached, true); return; }
+
+        var net = new Lampa.Reguest();
+        net.timeout(25000);
+        net.silent(apiUrl(base, path), function (data) {
+            var items = (data && data._embedded && data._embedded.items) || [];
+            cacheSet(key, items);
+            cb(items, false);
+        }, function () { cb([], false); });
+    }
+
     // ---------- безопасные обёртки ----------
     function canmove(dir) {
         try { return Navigator.canmove(dir); } catch (e) { return false; }
@@ -97,6 +122,7 @@
     var ICON_PLAY = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
     var ICON_BACK = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>';
     var ICON_REFRESH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>';
+    var ICON_SEARCH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>';
 
     function buildRow(leftHtml, title, subtitle) {
         var el = $(
@@ -115,16 +141,175 @@
         return el;
     }
 
-    // ---------- экран ----------
+    function attachController(scroll, getLast) {
+        Lampa.Controller.add('content', {
+            toggle: function () {
+                try {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(getLast() || false, scroll.render());
+                } catch (e) { log('focus error', e); }
+            },
+            left: function () {
+                if (canmove('left')) moveFocus('left');
+                else Lampa.Controller.toggle('menu');
+            },
+            right: function () { moveFocus('right'); },
+            up: function () { if (canmove('up')) moveFocus('up'); },
+            down: function () { if (canmove('down')) moveFocus('down'); },
+            back: function () { Lampa.Activity.backward(); }
+        });
+
+        Lampa.Controller.toggle('content');
+    }
+
+    function playList(items, index) {
+        var playlist = items.filter(function (f) { return !!f.file; }).map(function (f) {
+            return { title: f.name, url: f.file };
+        });
+
+        if (!playlist.length) {
+            Lampa.Noty.show('Нет доступных видео', { style: 'error' });
+            return;
+        }
+
+        try { Lampa.Player.playlist(playlist); } catch (e) { log('playlist error', e); }
+
+        var item = items[index] || items[0];
+        Lampa.Player.play({ title: item.name, url: item.file });
+    }
+
+    // ---------- поиск ----------
+    var searchState = { query: '', running: false };
+
+    function searchWalk(base, path, query, depth, acc, done) {
+        if (acc.length >= SEARCH_LIMIT) { done(); return; }
+
+        fetchList(base, path, function (items) {
+            var dirs = [];
+            var i;
+
+            for (i = 0; i < items.length; i++) {
+                var it = items[i];
+                if (it.type === 'dir') {
+                    dirs.push(it);
+                } else if (it.type === 'file' && isVideo(it.name) && String(it.name).toLowerCase().indexOf(query) >= 0) {
+                    if (acc.length < SEARCH_LIMIT) acc.push(it);
+                }
+            }
+
+            if (depth <= 0 || !dirs.length) { done(); return; }
+
+            var n = 0;
+
+            (function nextDir() {
+                if (n >= dirs.length || acc.length >= SEARCH_LIMIT) { done(); return; }
+                var d = dirs[n++];
+                searchWalk(base, d.path, query, depth - 1, acc, nextDir);
+            })();
+        });
+    }
+
+    function DancesResultsScreen(object) {
+        var scroll = new Lampa.Scroll({ mask: true, over: true });
+        var items = object.items || [];
+        var query = object.query || '';
+        var last = false;
+
+        this.create = function () {
+            var act = this.activity;
+
+            if (!items.length) {
+                act.loader(false);
+                act.empty();
+                return this.render();
+            }
+
+            var total = 0;
+
+            items.forEach(function (item, idx) {
+                var left = (previewsOn() && item.preview)
+                    ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                    : '<div class="dances__ico">' + ICON_PLAY + '</div>';
+
+                var folder = dirOf(item.path);
+                var el = buildRow(left, item.name, humanSize(item.size) + ' • ' + folder);
+
+                el.on('hover:focus', function () { last = el; });
+                el.on('hover:enter', function () { playList(items, idx); });
+
+                scroll.append(el);
+                total++;
+            });
+
+            log('results rendered', total);
+            return this.render();
+        };
+
+        this.start = function () { attachController(scroll, function () { return last; }); };
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); };
+        this.render = function () { return scroll.render(); };
+        this.empty = function () {
+            try { this.activity.loader(false); this.activity.empty(); } catch (e) {}
+        };
+    }
+
+    function runSearch(base, notify) {
+        if (searchState.running) {
+            Lampa.Noty.show('Поиск уже выполняется');
+            return;
+        }
+
+        var controller = 'content';
+        try { controller = Lampa.Controller.enabled().name; } catch (e) {}
+
+        Lampa.Input.edit({
+            value: searchState.query || '',
+            free: true,
+            nosave: true
+        }, function (value) {
+            try { Lampa.Controller.toggle(controller); } catch (e) {}
+
+            var q = String(value || '').trim();
+
+            if (q.length < 2) {
+                Lampa.Noty.show('Введите хотя бы 2 символа');
+                return;
+            }
+
+            searchState.query = q;
+            searchState.running = true;
+            notify('Ищу «' + q + '» по всем папкам…');
+
+            var acc = [];
+
+            searchWalk(base, '/', q.toLowerCase(), SEARCH_DEPTH, acc, function () {
+                searchState.running = false;
+                notify('');
+
+                if (!acc.length) {
+                    Lampa.Noty.show('Ничего не найдено', { style: 'error' });
+                    return;
+                }
+
+                Lampa.Activity.push({
+                    url: '', title: 'Поиск: ' + q, component: 'dances_results',
+                    items: acc, query: q, page: 1
+                });
+            });
+        });
+    }
+
+    // ---------- экран списка ----------
+    var prefetched = {};
+
     function DancesScreen(object) {
         var scroll = new Lampa.Scroll({ mask: true, over: true });
-        var net = new Lampa.Reguest();
         var path = object.path || '/';
         var base = object.base || publicKey();
         var alive = true;
         var last = false;
         var act = null;
-        var playlist = [];
 
         function loader(state) {
             try { if (act) act.loader(state); } catch (e) {}
@@ -136,9 +321,7 @@
         }
 
         function resetScroll() {
-            try {
-                if (typeof scroll.clear === 'function') scroll.clear();
-            } catch (e) { log('scroll clear error', e); }
+            try { if (typeof scroll.clear === 'function') scroll.clear(); } catch (e) {}
         }
 
         function sortItems(items) {
@@ -162,21 +345,29 @@
             var dirs = sorted.dirs;
             var files = sorted.files;
 
-            if (!dirs.length && !files.length) {
-                emptyState();
-                return;
-            }
+            if (!dirs.length && !files.length) { emptyState(); return; }
 
             if (path !== '/') {
                 var back = buildRow('<div class="dances__ico">' + ICON_BACK + '</div>', 'Назад', 'на уровень выше');
+                back.on('hover:focus', function () { last = back; });
                 back.on('hover:enter', function () { Lampa.Activity.backward(); });
                 scroll.append(back);
             }
+
+            var search = buildRow('<div class="dances__ico">' + ICON_SEARCH + '</div>', 'Поиск по всем папкам', 'нажми и введи название');
+            search.on('hover:focus', function () { last = search; });
+            search.on('hover:enter', function () {
+                runSearch(base, function (msg) {
+                    if (msg) Lampa.Noty.show(msg);
+                });
+            });
+            scroll.append(search);
 
             var totalSize = files.reduce(function (s, f) { return s + (f.size || 0); }, 0);
 
             if (fromCache) {
                 var ref = buildRow('<div class="dances__ico">' + ICON_REFRESH + '</div>', 'Обновить список', 'сейчас показан кэш');
+                ref.on('hover:focus', function () { last = ref; });
                 ref.on('hover:enter', function () {
                     cacheClear();
                     resetScroll();
@@ -187,74 +378,68 @@
                 scroll.append(ref);
             }
 
-            playlist = files.filter(function (f) { return !!f.file; }).map(function (f) {
-                return { title: f.name, url: f.file };
-            });
-
-            if (playlist.length > 1) {
-                var sub = playlist.length + ' видео';
+            if (files.length > 1) {
+                var sub = files.length + ' видео';
                 if (totalSize) sub += ' • ' + humanSize(totalSize);
                 var all = buildRow('<div class="dances__ico">' + ICON_PLAY + '</div>', 'Смотреть всё', sub);
-                all.on('hover:enter', function () {
-                    Lampa.Player.playlist(playlist);
-                    Lampa.Player.play({ title: 'Танцы', url: playlist[0].url });
-                });
+                all.on('hover:focus', function () { last = all; });
+                all.on('hover:enter', function () { playList(files, 0); });
                 scroll.append(all);
             }
 
             dirs.forEach(function (item) {
                 var el = buildRow('<div class="dances__ico">' + ICON_FOLDER + '</div>', item.name, 'папка');
+
+                el.on('hover:focus', function () {
+                    last = el;
+                    // предзагрузка содержимого папки, чтобы открывалась мгновенно
+                    var key = listingKey(base, item.path);
+                    if (!prefetched[key]) {
+                        prefetched[key] = true;
+                        fetchList(base, item.path, function () {});
+                    }
+                });
+
                 el.on('hover:enter', function () {
                     Lampa.Activity.push({
                         url: '', title: item.name, component: 'dances_screen',
                         base: base, path: item.path || (path + '/' + item.name), page: 1
                     });
                 });
+
                 scroll.append(el);
             });
 
-            files.forEach(function (item) {
+            files.forEach(function (item, idx) {
                 var left = (previewsOn() && item.preview)
                     ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
                     : '<div class="dances__ico">' + ICON_PLAY + '</div>';
 
                 var el = buildRow(left, item.name, humanSize(item.size));
-                el.on('hover:enter', function () { playFile(base, item, playlist); });
+                el.on('hover:focus', function () { last = el; });
+                el.on('hover:enter', function () { playList(files, idx); });
                 scroll.append(el);
             });
+
+            log('painted', dirs.length, 'dirs', files.length, 'files');
         }
 
         function load(useCache) {
-            var cacheKey = base + '|' + path + '|' + sortMode() + '|' + (previewsOn() ? 'p' : 'n');
+            var cacheKey = listingKey(base, path);
 
             if (useCache) {
                 var cached = cacheGet(cacheKey);
-                if (cached && cached.length) {
-                    paint(cached, true);
-                    return;
-                }
+                if (cached && cached.length) { paint(cached, true); return; }
             }
 
-            net.timeout(25000);
             loader(true);
 
-            net.silent(apiUrl(base, path), function (data) {
+            fetchList(base, path, function (items, fromCache) {
                 if (!alive) return;
                 loader(false);
 
-                var items = (data && data._embedded && data._embedded.items) || [];
-                if (!items.length) {
-                    emptyState();
-                    return;
-                }
-
-                cacheSet(cacheKey, items);
-                paint(items, false);
-            }, function () {
-                if (!alive) return;
-                loader(false);
-                Lampa.Noty.show('Не удалось получить список файлов', { style: 'error' });
-                emptyState();
+                if (!items.length) { emptyState(); return; }
+                paint(items, fromCache && useCache);
             });
         }
 
@@ -264,62 +449,14 @@
             return this.render();
         };
 
-        this.start = function () {
-            Lampa.Controller.add('content', {
-                toggle: function () {
-                    try {
-                        Lampa.Controller.collectionSet(scroll.render());
-                        Lampa.Controller.collectionFocus(last || false, scroll.render());
-                    } catch (e) { log('focus error', e); }
-                },
-                left: function () {
-                    if (canmove('left')) moveFocus('left');
-                    else Lampa.Controller.toggle('menu');
-                },
-                right: function () { moveFocus('right'); },
-                up: function () { if (canmove('up')) moveFocus('up'); },
-                down: function () { if (canmove('down')) moveFocus('down'); },
-                back: function () { Lampa.Activity.backward(); }
-            });
-
-            Lampa.Controller.toggle('content');
-        };
-
+        this.start = function () { attachController(scroll, function () { return last; }); };
         this.stop = function () {};
         this.destroy = function () {
             alive = false;
-            net.clear();
             scroll.destroy();
         };
         this.render = function () { return scroll.render(); };
         this.empty = function () { emptyState(); };
-    }
-
-    function playFile(base, item, playlist) {
-        function start(url) {
-            try {
-                if (playlist && playlist.length > 1) Lampa.Player.playlist(playlist);
-            } catch (e) { log('playlist error', e); }
-
-            Lampa.Player.play({ title: item.name, url: url });
-        }
-
-        if (item.file) {
-            start(item.file);
-            return;
-        }
-
-        var net = new Lampa.Reguest();
-        net.timeout(25000);
-        net.silent(
-            'https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=' +
-                encodeURIComponent(base) + '&path=' + encodeURIComponent(item.path),
-            function (data) {
-                if (data && data.href) start(data.href);
-                else Lampa.Noty.show('Не удалось получить ссылку на файл', { style: 'error' });
-            },
-            function () { Lampa.Noty.show('Не удалось получить ссылку на файл', { style: 'error' }); }
-        );
     }
 
     // ---------- init ----------
@@ -336,9 +473,8 @@
             '</style>');
         $('body').append(Lampa.Template.get('dances_css', {}, true));
 
-        if (!Lampa.Component.get('dances_screen')) {
-            Lampa.Component.add('dances_screen', DancesScreen);
-        }
+        if (!Lampa.Component.get('dances_screen')) Lampa.Component.add('dances_screen', DancesScreen);
+        if (!Lampa.Component.get('dances_results')) Lampa.Component.add('dances_results', DancesResultsScreen);
 
         Lampa.SettingsApi.addComponent({
             component: 'dances',
@@ -349,10 +485,7 @@
         Lampa.SettingsApi.addParam({
             component: 'dances',
             param: { name: KEY_URL, type: 'input', default: DEFAULT_URL },
-            field: {
-                name: 'Ссылка на папку Яндекс.Диска',
-                description: 'Публичная ссылка вида https://disk.yandex.ru/d/XXXX'
-            }
+            field: { name: 'Ссылка на папку Яндекс.Диска', description: 'Публичная ссылка вида https://disk.yandex.ru/d/XXXX' }
         });
 
         Lampa.SettingsApi.addParam({
