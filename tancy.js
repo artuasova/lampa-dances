@@ -292,6 +292,7 @@
         this.keypadAvailable = function () { return keypadWorks; };
         this.add = function (el) { items.push(el); return el; };
         this.focusFirst = function () { idx = 0; applyFocus(); };
+        this.focusCurrent = function () { applyFocus(); };
 
         var lastActivate = 0;
 
@@ -414,8 +415,21 @@
     }
 
     var lastPlayed = '—';
+    var queue = { items: [], idx: -1 };
+
+    function autoNextOn() {
+        var v = Lampa.Storage.field('dances_autonext');
+        return (v === undefined || v === null) ? true : !!v;
+    }
+
+    function playExact(item) {
+        lastPlayed = item.name;
+        log('play exact', item.name);
+        Lampa.Player.play({ title: item.name, url: item.file });
+    }
 
     function playList(items, index) {
+        var playable = items.filter(function (f) { return !!f.file; });
         var item = items[index] || items[0];
 
         if (!item) {
@@ -428,11 +442,24 @@
             return;
         }
 
-        // никаких плейлистов Lampa: только точная ссылка выбранного файла
-        lastPlayed = item.name;
-        log('play exact', item.name);
+        // очередь для автоперехода — своя, без плейлиста Lampa
+        queue.items = playable;
+        queue.idx = playable.indexOf(item);
+        if (queue.idx < 0) queue.idx = 0;
 
-        Lampa.Player.play({ title: item.name, url: item.file });
+        playExact(item);
+    }
+
+    function playNextFromQueue() {
+        if (!autoNextOn()) return;
+        if (queue.idx < 0 || queue.idx + 1 >= queue.items.length) return;
+
+        queue.idx++;
+        var next = queue.items[queue.idx];
+        if (!next || !next.file) return;
+
+        log('auto next', next.name);
+        playExact(next);
     }
 
     function playRandom(base) {
@@ -501,7 +528,7 @@
             root.fit();
             nav.bind();
             nav.useController();
-            nav.focusFirst();
+            if (nav.count()) nav.focusCurrent(); else nav.focusFirst();
 
             setTimeout(function () { root.fit(); }, 300);
         };
@@ -735,7 +762,7 @@
             root.fit();
             nav.bind();
             nav.useController();
-            nav.focusFirst();
+            if (nav.count()) nav.focusCurrent(); else nav.focusFirst();
 
             setTimeout(function () { root.fit(); }, 300);
         };
@@ -753,7 +780,28 @@
     }
 
     // ---------- init ----------
+    function bindAutoNext() {
+        try {
+            Lampa.Player.listener.follow('start', function () {
+                if (!queue.items.length) return;
+
+                var onEnded = function () { playNextFromQueue(); };
+
+                try { Lampa.PlayerVideo.listener.follow('ended', onEnded); } catch (e) { return; }
+
+                var onDestroy = function () {
+                    try { Lampa.PlayerVideo.listener.remove('ended', onEnded); } catch (e) {}
+                    try { Lampa.Player.listener.remove('destroy', onDestroy); } catch (e) {}
+                };
+
+                try { Lampa.Player.listener.follow('destroy', onDestroy); } catch (e) {}
+            });
+        } catch (e) { log('autonext bind error', e); }
+    }
+
     function init() {
+        bindAutoNext();
+
         Lampa.Template.add('dances_css', '<style>' +
             '.dances-scroll{position:relative;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;outline:none}' +
             '.dances-scroll__body{padding:.4em .2em 8em}' +
@@ -813,6 +861,12 @@
             component: 'dances',
             param: { name: KEY_PREVIEW, type: 'trigger', default: true },
             field: { name: 'Превью видео', description: 'Кадры из видео' }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'dances',
+            param: { name: 'dances_autonext', type: 'trigger', default: true },
+            field: { name: 'Следующее видео само', description: 'Включать следующее в папке после окончания текущего' }
         });
 
         var btn = $(
