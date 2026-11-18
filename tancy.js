@@ -4,7 +4,7 @@
     if (window.dances_plugin_ready) return;
     window.dances_plugin_ready = true;
 
-    var PLUGIN_VERSION = 'v13';
+    var PLUGIN_VERSION = 'v14';
     var KEY_URL = 'dances_public_url';
     var KEY_SORT = 'dances_sort';
     var KEY_PREVIEW = 'dances_preview';
@@ -20,6 +20,7 @@
     var INDEX_LIMIT = 6000;
     var MAX_DEPTH = 6;
     var globalLastActivate = 0;
+    var activeNav = null;
 
     function log() {
         try { console.log.apply(console, ['[Dances]'].concat([].slice.call(arguments))); } catch (e) {}
@@ -351,7 +352,7 @@
         } catch (e2) { log('scroll error', e2); }
     };
 
-    function Nav(root, componentName, getActivity) {
+    function Nav(root, componentName) {
         var self = this;
         var items = [];
         var idx = 0;
@@ -376,21 +377,7 @@
         function isOurActivity() {
             try {
                 var a = Lampa.Activity.active();
-                if (!a) return false;
-
-                // Ключевая изоляция: события обрабатывает ТОЛЬКО активный экран Lampa,
-                // фоновые экраны в стеке не должны ловить кнопки и открывать чужие папки!
-                if (typeof getActivity === 'function') {
-                    var myAct = getActivity();
-                    if (myAct && a !== myAct) return false;
-                }
-                if (a.component !== componentName) return false;
-
-                // фокус должен быть именно на нашем контенте: если он ушёл
-                // в боковое меню или в клавиатуру — не трогаем список
-                var c = Lampa.Controller.enabled();
-                if (c && c.name && c.name !== 'content') return false;
-
+                if (!a || a.component !== componentName) return false;
                 if (overlayOpen()) return false;
                 return true;
             } catch (e) { return false; }
@@ -402,7 +389,7 @@
 
         function applyFocus() {
             if (prevFocused && (!items[idx] || prevFocused !== items[idx])) {
-                $(prevFocused).removeClass('dances--nav-focus');
+                $(prevFocused).removeClass('dances--nav-focus dances__row--focus dances__card--focus dances__tool--focus');
                 prevFocused = null;
             }
 
@@ -414,7 +401,7 @@
         }
 
         this.reset = function () {
-            if (prevFocused) $(prevFocused).removeClass('dances--nav-focus');
+            if (prevFocused) $(prevFocused).removeClass('dances--nav-focus dances__row--focus dances__card--focus dances__tool--focus');
             prevFocused = null;
             items = [];
             idx = 0;
@@ -493,14 +480,19 @@
         };
 
         var handlers = {
-            down: function () { if (isOurActivity()) { self.move('down'); return false; } },
-            up: function () { if (isOurActivity()) { self.move('up'); return false; } },
-            left: function () { if (isOurActivity()) { self.move('left'); return false; } },
-            right: function () { if (isOurActivity()) { self.move('right'); return false; } },
-            enter: function () { if (isOurActivity()) { self.activate(); return false; } }
+            down: function () { if (activeNav === self && isOurActivity()) { self.move('down'); return false; } },
+            up: function () { if (activeNav === self && isOurActivity()) { self.move('up'); return false; } },
+            left: function () { if (activeNav === self && isOurActivity()) { self.move('left'); return false; } },
+            right: function () { if (activeNav === self && isOurActivity()) { self.move('right'); return false; } },
+            enter: function () { if (activeNav === self && isOurActivity()) { self.activate(); return false; } }
         };
 
         this.bind = function () {
+            if (activeNav && activeNav !== self) {
+                try { activeNav.unbind(); } catch (e) {}
+            }
+            activeNav = self;
+
             if (bound || !keypadWorks) return;
             bound = true;
             try { Lampa.Keypad.listener.follow('down', handlers.down); } catch (e) {}
@@ -511,6 +503,7 @@
         };
 
         this.unbind = function () {
+            if (activeNav === self) activeNav = null;
             if (!bound) return;
             bound = false;
             try { Lampa.Keypad.listener.remove('down', handlers.down); } catch (e) {}
@@ -530,8 +523,6 @@
                         back: function () { Lampa.Activity.backward(); }
                     });
 
-                    // ключевое: у Lampa не должно остаться своей коллекции элементов,
-                    // иначе она сама активирует «свой» пункт — отсюда и левые видео
                     try { Lampa.Controller.collectionSet($()); } catch (e) {}
                     try { Lampa.Controller.clear(); } catch (e) {}
 
@@ -734,11 +725,10 @@
     function DancesResultsScreen(object) {
         var root = new Root();
         var items = object.items || [];
-        var act = null;
-        var nav = new Nav(root, 'dances_results', function () { return act; });
+        var nav = new Nav(root, 'dances_results');
 
         this.create = function () {
-            act = this.activity;
+            var act = this.activity;
 
             if (!items.length) {
                 try { if (act) { act.loader(false); act.empty(); } } catch (e) {}
@@ -844,7 +834,7 @@
         var base = object.base || publicKey();
         var alive = true;
         var act = null;
-        var nav = new Nav(root, 'dances_screen', function () { return act; });
+        var nav = new Nav(root, 'dances_screen');
 
         function loader(state) {
             try { if (act) act.loader(state); } catch (e) {}
