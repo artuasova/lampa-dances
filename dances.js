@@ -4,7 +4,7 @@
     if (window.dances_plugin_ready) return;
     window.dances_plugin_ready = true;
 
-    var PLUGIN_VERSION = 'v14';
+    var PLUGIN_VERSION = 'v15';
     var KEY_URL = 'dances_public_url';
     var KEY_SORT = 'dances_sort';
     var KEY_PREVIEW = 'dances_preview';
@@ -517,10 +517,16 @@
             try {
                 if (keypadWorks) {
                     Lampa.Controller.add('content', {
-                        toggle: function () { applyFocus(); },
+                        toggle: function () {
+                            self.bind();
+                            applyFocus();
+                        },
                         left: function () {}, right: function () {},
                         up: function () {}, down: function () {}, enter: function () {},
-                        back: function () { Lampa.Activity.backward(); }
+                        back: function () {
+                            self.unbind();
+                            Lampa.Activity.backward();
+                        }
                     });
 
                     try { Lampa.Controller.collectionSet($()); } catch (e) {}
@@ -532,13 +538,19 @@
                 }
 
                 Lampa.Controller.add('content', {
-                    toggle: function () { applyFocus(); },
+                    toggle: function () {
+                        self.bind();
+                        applyFocus();
+                    },
                     left: function () { self.move('left'); },
                     right: function () { self.move('right'); },
                     up: function () { self.move('up'); },
                     down: function () { self.move('down'); },
                     enter: function () { self.activate(); },
-                    back: function () { Lampa.Activity.backward(); }
+                    back: function () {
+                        self.unbind();
+                        Lampa.Activity.backward();
+                    }
                 });
                 Lampa.Controller.toggle('content');
             } catch (e) { log('controller error', e); }
