@@ -255,6 +255,10 @@
 
         this.reset = function () { items = []; idx = 0; };
 
+        this.count = function () { return items.length; };
+
+        this.keypadAvailable = function () { return keypadWorks; };
+
         this.add = function (el) {
             items.push(el);
             return el;
@@ -588,6 +592,21 @@
 
             action(ICON_SHUFFLE, 'Случайное видео', 'из всех папок', function () {
                 playRandom(base);
+            });
+
+            action(ICON_REFRESH, 'Проверка пульта', 'нажми, если стрелки не работают', function () {
+                var ctrl = '?';
+                try { ctrl = Lampa.Controller.enabled().name; } catch (e) {}
+                var comp = '?';
+                try { comp = Lampa.Activity.active().component; } catch (e) {}
+                Lampa.Noty.show(
+                    'Keypad: ' + (nav.keypadAvailable() ? 'да' : 'нет') +
+                    ' • фокус: ' + ctrl +
+                    ' • экран: ' + comp +
+                    ' • элементов: ' + nav.count(),
+                    { time: 8000 }
+                );
+                log('diagnostics', { keypad: nav.keypadAvailable(), ctrl: ctrl, comp: comp, items: nav.count() });
             });
 
             if (fromCache) {
