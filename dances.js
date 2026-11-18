@@ -18,7 +18,7 @@
     }
 
     function apiUrl(base, path) {
-        var u = API + '?public_key=' + encodeURIComponent(base) + '&limit=1000&sort=name';
+        var u = API + '?public_key=' + encodeURIComponent(base) + '&limit=1000&sort=name&preview_size=M';
         if (path && path !== '/') u += '&path=' + encodeURIComponent(path);
         return u;
     }
@@ -31,6 +31,33 @@
         return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    function humanSize(bytes) {
+        if (!bytes) return '';
+        var mb = bytes / 1048576;
+        if (mb < 1024) return Math.round(mb) + ' МБ';
+        return (mb / 1024).toFixed(1).replace('.', ',') + ' ГБ';
+    }
+
+    var ICON_FOLDER = '<svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>';
+    var ICON_PLAY = '<svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+
+    function buildRow(leftHtml, title, subtitle) {
+        var el = $(
+            '<div class="selector dances__row">' +
+                '<div class="dances__left">' + leftHtml + '</div>' +
+                '<div class="dances__body">' +
+                    '<div class="dances__title">' + esc(title) + '</div>' +
+                    (subtitle ? '<div class="dances__sub">' + esc(subtitle) + '</div>' : '') +
+                '</div>' +
+            '</div>'
+        );
+
+        el.on('hover:focus', function () { el.addClass('dances__row--focus'); });
+        el.on('hover:blur', function () { el.removeClass('dances__row--focus'); });
+
+        return el;
+    }
+
     // ---------- экран списка ----------
     function DancesScreen(object) {
         var scroll = new Lampa.Scroll({ mask: true, over: true });
@@ -38,6 +65,8 @@
         var path = object.path || '/';
         var base = object.base || publicKey();
         var alive = true;
+        var last = false;
+        var playlist = [];
 
         this.create = function () {
             var self = this;
@@ -58,12 +87,29 @@
                     return;
                 }
 
+                playlist = files.filter(function (f) { return !!f.file; }).map(function (f) {
+                    return { title: f.name, url: f.file };
+                });
+
+                if (playlist.length > 1) {
+                    var all = buildRow(
+                        '<div class="dances__ico">' + ICON_PLAY + '</div>',
+                        'Смотреть всё',
+                        playlist.length + ' видео подряд'
+                    );
+                    all.on('hover:enter', function () {
+                        Lampa.Player.playlist(playlist);
+                        Lampa.Player.play({ title: 'Танцы', url: playlist[0].url });
+                    });
+                    scroll.append(all);
+                }
+
                 dirs.forEach(function (item) {
-                    var el = $(
-                        '<div class="selector dances-item">' +
-                            '<div class="dances-item__ico">▶</div>' +
-                            '<div class="dances-item__name">' + esc(item.name) + '</div>' +
-                        '</div>'
+                    var count = item._embedded && item._embedded.total ? item._embedded.total : '';
+                    var el = buildRow(
+                        '<div class="dances__ico">' + ICON_FOLDER + '</div>',
+                        item.name,
+                        count ? count + ' объектов' : 'папка'
                     );
 
                     el.on('hover:enter', function () {
@@ -76,21 +122,15 @@
                     scroll.append(el);
                 });
 
-                // плейлист текущей папки (для перехода к следующему видео)
-                var playlist = files.filter(function (f) { return !!f.file; }).map(function (f) {
-                    return { title: f.name, url: f.file };
-                });
-
                 files.forEach(function (item) {
-                    var el = $(
-                        '<div class="selector dances-item">' +
-                            '<div class="dances-item__ico">♪</div>' +
-                            '<div class="dances-item__name">' + esc(item.name) + '</div>' +
-                        '</div>'
-                    );
+                    var left = item.preview
+                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                        : '<div class="dances__ico">' + ICON_PLAY + '</div>';
+
+                    var el = buildRow(left, item.name, humanSize(item.size));
 
                     el.on('hover:enter', function () {
-                        playItem(base, item, playlist);
+                        playFile(base, item, playlist);
                     });
 
                     scroll.append(el);
@@ -105,7 +145,29 @@
             return this.render();
         };
 
-        this.start = function () {};
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () {
+                    if (Navigator.canmove('left')) Navigator.move('left');
+                    else Lampa.Controller.toggle('menu');
+                },
+                right: function () { Navigator.move('right'); },
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                },
+                down: function () {
+                    if (Navigator.canmove('down')) Navigator.move('down');
+                },
+                back: function () { Lampa.Activity.backward(); }
+            });
+
+            Lampa.Controller.toggle('content');
+        };
+
         this.stop = function () {};
         this.destroy = function () {
             alive = false;
@@ -116,12 +178,10 @@
         this.empty = function () { this.activity.loader(false); this.activity.empty(); };
     }
 
-    function playItem(base, item, playlist) {
+    function playFile(base, item, playlist) {
         var start = function (url) {
             try {
-                if (playlist && playlist.length > 1 && Lampa.Player.playlist) {
-                    Lampa.Player.playlist(playlist);
-                }
+                if (playlist && playlist.length > 1) Lampa.Player.playlist(playlist);
             } catch (e) { log('playlist error', e); }
 
             Lampa.Player.play({ title: item.name, url: url });
@@ -147,6 +207,18 @@
 
     // ---------- инициализация ----------
     function init() {
+        Lampa.Template.add('dances_css', '<style>' +
+            '.dances__row{display:flex;align-items:center;gap:.9em;padding:.65em 1em;margin:.35em .5em;border-radius:.7em;background:rgba(255,255,255,.05);transition:background .15s ease,transform .15s ease}' +
+            '.dances__row--focus{background:rgba(255,255,255,.19);transform:scale(1.012)}' +
+            '.dances__left{flex:0 0 auto;display:flex;align-items:center;justify-content:center;min-width:104px}' +
+            '.dances__ico{color:rgba(255,255,255,.9);display:flex;align-items:center;justify-content:center;min-width:104px}' +
+            '.dances__thumb{width:104px;height:58px;object-fit:cover;border-radius:.4em;background:#000}' +
+            '.dances__body{flex:1 1 auto;min-width:0}' +
+            '.dances__title{font-size:1.02em;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.dances__sub{font-size:.82em;opacity:.55;margin-top:.15em}' +
+            '</style>');
+        $('body').append(Lampa.Template.get('dances_css', {}, true));
+
         if (!Lampa.Component.get('dances_screen')) {
             Lampa.Component.add('dances_screen', DancesScreen);
         }
