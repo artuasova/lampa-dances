@@ -413,19 +413,25 @@
         };
     }
 
-    function playList(items, index) {
-        var playlist = items.filter(function (f) { return !!f.file; }).map(function (f) {
-            return { title: f.name, url: f.file };
-        });
+    var lastPlayed = '—';
 
-        if (!playlist.length) {
-            Lampa.Noty.show('Нет доступных видео', { style: 'error' });
+    function playList(items, index) {
+        var item = items[index] || items[0];
+
+        if (!item) {
+            Lampa.Noty.show('Пустой список', { style: 'error' });
             return;
         }
 
-        try { Lampa.Player.playlist(playlist); } catch (e) { log('playlist error', e); }
+        if (!item.file) {
+            Lampa.Noty.show('Нет прямой ссылки на файл', { style: 'error' });
+            return;
+        }
 
-        var item = items[index] || items[0];
+        // никаких плейлистов Lampa: только точная ссылка выбранного файла
+        lastPlayed = item.name;
+        log('play exact', item.name);
+
         Lampa.Player.play({ title: item.name, url: item.file });
     }
 
@@ -641,7 +647,7 @@
                     ' • фокус: ' + ctrl +
                     ' • экран: ' + comp +
                     ' • элементов: ' + nav.count() +
-                    ' • скролл: ' + scrolled,
+                    ' • скролл: ' + scrolled + ' • последнее: ' + lastPlayed,
                     { time: 8000 }
                 );
             });
