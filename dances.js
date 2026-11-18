@@ -28,9 +28,102 @@
         return (v === undefined || v === null || v === '') ? def : v;
     }
 
+    var KEY_SOURCES = 'dances_sources';
+    var KEY_CURRENT = 'dances_cur';
+
+    function sourcesGet() {
+        try {
+            var raw = Lampa.Storage.get(KEY_SOURCES, null);
+            if (raw && raw.length) return raw;
+        } catch (e) {}
+
+        var legacy = String(setting(KEY_URL, '') || '').trim();
+        return [{ n: 'Танцы', u: legacy || DEFAULT_URL }];
+    }
+
+    function sourcesSave(list) {
+        try { Lampa.Storage.set(KEY_SOURCES, list); } catch (e) {}
+    }
+
+    function currentIndex() {
+        var list = sourcesGet();
+        var i = Number(Lampa.Storage.get(KEY_CURRENT, 0));
+        if (isNaN(i) || i < 0 || i >= list.length) i = 0;
+        return i;
+    }
+
+    function currentSource() {
+        var list = sourcesGet();
+        return list[currentIndex()] || { n: 'Танцы', u: DEFAULT_URL };
+    }
+
     function publicKey() {
-        var saved = setting(KEY_URL, '');
-        return String(saved || '').trim() || DEFAULT_URL;
+        var src = currentSource();
+        return String((src && src.u) || DEFAULT_URL).trim() || DEFAULT_URL;
+    }
+
+    function setCurrentSource(i) {
+        try { Lampa.Storage.set(KEY_CURRENT, i); } catch (e) {}
+    }
+
+    function addSource(cb) {
+        Lampa.Input.edit({ value: '', free: true, nosave: true }, function (value) {
+            try { Lampa.Controller.toggle('content'); } catch (e) {}
+
+            var url = String(value || '').trim();
+
+            if (!/^https?:\/\//i.test(url)) {
+                Lampa.Noty.show('Нужна ссылка вида https://disk.yandex.ru/d/...', { style: 'error' });
+                return;
+            }
+
+            var list = sourcesGet();
+            list.push({ n: 'Папка ' + (list.length + 1), u: url });
+            sourcesSave(list);
+            setCurrentSource(list.length - 1);
+            Lampa.Noty.show('Добавлена новая папка');
+            if (cb) cb(url);
+        });
+    }
+
+    function openSources(cb) {
+        var list = sourcesGet();
+        var cur = currentIndex();
+        var items = list.map(function (s, i) {
+            return { title: (i === cur ? '● ' : '') + s.n, idx: i };
+        });
+
+        items.push({ title: '＋ Добавить папку', add: true });
+        if (list.length > 1) items.push({ title: '✕ Удалить текущую', del: true });
+
+        Lampa.Select.show({
+            title: 'Источники',
+            items: items,
+            onSelect: function (choice) {
+                try { Lampa.Select.close(); } catch (e) {}
+
+                if (choice.add) { addSource(cb); return; }
+
+                if (choice.del) {
+                    var l2 = sourcesGet();
+                    l2.splice(cur, 1);
+                    if (!l2.length) l2 = [{ n: 'Танцы', u: DEFAULT_URL }];
+                    sourcesSave(l2);
+                    setCurrentSource(0);
+                    Lampa.Noty.show('Удалено');
+                    if (cb) cb(publicKey());
+                    return;
+                }
+
+                setCurrentSource(choice.idx);
+                Lampa.Noty.show('Источник: ' + sourcesGet()[choice.idx].n);
+                if (cb) cb(publicKey());
+            },
+            onBack: function () {
+                try { Lampa.Select.close(); } catch (e) {}
+                try { Lampa.Controller.toggle('content'); } catch (e) {}
+            }
+        });
     }
 
     function sortMode() { return setting(KEY_SORT, 'name'); }
@@ -416,15 +509,65 @@
 
     var lastPlayed = '—';
     var queue = { items: [], idx: -1 };
+    var KEY_POS = 'dances_pos_';
+    var pendingSeek = 0;
+    var currentUrl = '';
+
+    function hashStr(s) {
+        var h = 0;
+        s = String(s || '');
+        for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+        return Math.abs(h).toString(36);
+    }
+
+    function posGet(url) {
+        try {
+            var raw = Lampa.Storage.get(KEY_POS + hashStr(url), null);
+            if (!raw || !raw.ts) return null;
+            if (raw.t < 20) return null;
+            if (raw.dur && raw.t > raw.dur - 25) return null;
+            return raw;
+        } catch (e) { return null; }
+    }
+
+    function posSet(url, t, dur) {
+        try {
+            var key = KEY_POS + hashStr(url);
+            Lampa.Storage.set(key, { t: Math.round(t), dur: Math.round(dur || 0), ts: Date.now() });
+
+            var keys = Lampa.Storage.get('dances_pos_keys', []) || [];
+            if (keys.indexOf(key) < 0) {
+                keys.push(key);
+                Lampa.Storage.set('dances_pos_keys', keys);
+            }
+        } catch (e) {}
+    }
+
+    function posReset() {
+        try {
+            var keys = Lampa.Storage.get('dances_pos_keys', []) || [];
+            keys.forEach(function (k) { Lampa.Storage.set(k, null); });
+            Lampa.Storage.set('dances_pos_keys', []);
+        } catch (e) {}
+    }
+
+    function fmtTime(sec) {
+        sec = Math.max(0, Math.round(sec));
+        var m = Math.floor(sec / 60);
+        var s = sec % 60;
+        return m + ':' + (s < 10 ? '0' : '') + s;
+    }
 
     function autoNextOn() {
         var v = Lampa.Storage.field('dances_autonext');
         return (v === undefined || v === null) ? true : !!v;
     }
 
-    function playExact(item) {
+    function playExact(item, startAt) {
         lastPlayed = item.name;
-        log('play exact', item.name);
+        currentUrl = item.file || '';
+        pendingSeek = startAt || 0;
+        log('play exact', item.name, 'seek=', pendingSeek);
         Lampa.Player.play({ title: item.name, url: item.file });
     }
 
@@ -447,7 +590,30 @@
         queue.idx = playable.indexOf(item);
         if (queue.idx < 0) queue.idx = 0;
 
-        playExact(item);
+        var saved = posGet(item.file);
+
+        if (saved && Lampa.Select && Lampa.Select.show) {
+            Lampa.Select.show({
+                title: 'Продолжить просмотр?',
+                items: [
+                    { title: 'Продолжить с ' + fmtTime(saved.t), seek: saved.t },
+                    { title: 'С начала', seek: 0 }
+                ],
+                onSelect: function (choice) {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    try { Lampa.Controller.toggle('content'); } catch (e) {}
+                    playExact(item, choice.seek || 0);
+                },
+                onBack: function () {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    try { Lampa.Controller.toggle('content'); } catch (e) {}
+                    playExact(item, 0);
+                }
+            });
+            return;
+        }
+
+        playExact(item, 0);
     }
 
     function playNextFromQueue() {
@@ -492,16 +658,6 @@
                 act.loader(false);
                 act.empty();
                 return this.render();
-            }
-
-            if (!dirs.length && !files.length) {
-                var empty = buildRow('<div class="dances__ico">' + ICON_INFO + '</div>',
-                    'В этой папке нет видео', 'пусто');
-                empty.on('hover:enter', function () { Lampa.Activity.backward(); });
-                root.append(empty);
-                nav.add(empty);
-                nav.focusFirst();
-                return;
             }
 
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
@@ -658,6 +814,15 @@
 
             tool(ICON_SEARCH, 'Поиск', function () { runSearch(base); });
             tool(ICON_SHUFFLE, 'Случайно', function () { playRandom(base); });
+            tool(ICON_FOLDER, 'Источники', function () {
+                openSources(function () {
+                    base = publicKey();
+                    cacheClear();
+                    nav.reset();
+                    root.clear();
+                    load(false);
+                });
+            });
 
             if (files.length > 1) {
                 tool(ICON_PLAY, 'Все', function () { playList(files, 0); });
@@ -672,6 +837,11 @@
                     Lampa.Noty.show('Обновляю список');
                 });
             }
+
+            tool(ICON_REFRESH, 'Сброс позиций', function () {
+                posReset();
+                Lampa.Noty.show('Отметки просмотра сброшены');
+            });
 
             tool(ICON_INFO, 'Проверка', function () {
                 var ctrl = '?';
@@ -828,9 +998,28 @@
                 try { module.listener.follow('ended', onEnded); } catch (e) { return; }
                 boundTo = module;
 
+                var seeked = !pendingSeek;
+                var onTime = function (e) {
+                    try {
+                        if (!seeked && pendingSeek > 0) {
+                            var video = module.video;
+                            if (video && video.currentTime !== undefined) {
+                                video.currentTime = pendingSeek;
+                                seeked = true;
+                                pendingSeek = 0;
+                            }
+                        }
+
+                        if (currentUrl && e && e.current > 10) posSet(currentUrl, e.current, e.duration);
+                    } catch (err) {}
+                };
+
+                try { module.listener.follow('timeupdate', onTime); } catch (e) {}
+
                 var onDestroy = function () {
                     if (boundTo === module) boundTo = null;
                     try { module.listener.remove('ended', onEnded); } catch (e) {}
+                    try { module.listener.remove('timeupdate', onTime); } catch (e) {}
                     try { Lampa.Player.listener.remove('destroy', onDestroy); } catch (e) {}
                 };
 
