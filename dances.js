@@ -4,7 +4,7 @@
     if (window.dances_plugin_ready) return;
     window.dances_plugin_ready = true;
 
-    var PLUGIN_VERSION = 'v12';
+    var PLUGIN_VERSION = 'v13';
     var KEY_URL = 'dances_public_url';
     var KEY_SORT = 'dances_sort';
     var KEY_PREVIEW = 'dances_preview';
@@ -19,6 +19,7 @@
     var SEARCH_LIMIT = 300;
     var INDEX_LIMIT = 6000;
     var MAX_DEPTH = 6;
+    var globalLastActivate = 0;
 
     function log() {
         try { console.log.apply(console, ['[Dances]'].concat([].slice.call(arguments))); } catch (e) {}
@@ -350,7 +351,7 @@
         } catch (e2) { log('scroll error', e2); }
     };
 
-    function Nav(root, componentName) {
+    function Nav(root, componentName, getActivity) {
         var self = this;
         var items = [];
         var idx = 0;
@@ -375,7 +376,15 @@
         function isOurActivity() {
             try {
                 var a = Lampa.Activity.active();
-                if (!a || a.component !== componentName) return false;
+                if (!a) return false;
+
+                // Ключевая изоляция: события обрабатывает ТОЛЬКО активный экран Lampa,
+                // фоновые экраны в стеке не должны ловить кнопки и открывать чужие папки!
+                if (typeof getActivity === 'function') {
+                    var myAct = getActivity();
+                    if (myAct && a !== myAct) return false;
+                }
+                if (a.component !== componentName) return false;
 
                 // фокус должен быть именно на нашем контенте: если он ушёл
                 // в боковое меню или в клавиатуру — не трогаем список
@@ -417,15 +426,13 @@
         this.focusFirst = function () { idx = 0; applyFocus(); };
         this.focusCurrent = function () { applyFocus(); };
 
-        var lastActivate = 0;
-
         this.activate = function () {
             var el = items[idx];
             if (!el) return;
 
             var now = Date.now();
-            if (now - lastActivate < 400) return;
-            lastActivate = now;
+            if (now - globalLastActivate < 450) return;
+            globalLastActivate = now;
 
             try { $(el).trigger('hover:enter'); } catch (e) { log('activate error', e); }
         };
@@ -727,10 +734,11 @@
     function DancesResultsScreen(object) {
         var root = new Root();
         var items = object.items || [];
-        var nav = new Nav(root, 'dances_results');
+        var act = null;
+        var nav = new Nav(root, 'dances_results', function () { return act; });
 
         this.create = function () {
-            var act = this.activity;
+            act = this.activity;
 
             if (!items.length) {
                 try { if (act) { act.loader(false); act.empty(); } } catch (e) {}
@@ -836,7 +844,7 @@
         var base = object.base || publicKey();
         var alive = true;
         var act = null;
-        var nav = new Nav(root, 'dances_screen');
+        var nav = new Nav(root, 'dances_screen', function () { return act; });
 
         function loader(state) {
             try { if (act) act.loader(state); } catch (e) {}
@@ -887,7 +895,10 @@
             };
 
             if (path !== '/') {
-                tool(ICON_BACK, 'Назад', function () { Lampa.Activity.backward(); });
+                tool(ICON_BACK, 'Назад', function () {
+                    nav.unbind();
+                    Lampa.Activity.backward();
+                });
             }
 
             tool(ICON_SEARCH, 'Поиск', function () { runSearch(base); });
@@ -947,7 +958,10 @@
             if (!dirs.length && !files.length) {
                 var empty = buildRow('<div class="dances__ico">' + ICON_INFO + '</div>',
                     'В этой папке нет видео', 'пусто');
-                empty.on('hover:enter', function () { Lampa.Activity.backward(); });
+                empty.on('hover:enter', function () {
+                    nav.unbind();
+                    Lampa.Activity.backward();
+                });
                 root.append(empty);
                 nav.add(empty);
                 nav.focusFirst();
@@ -963,6 +977,7 @@
                 if (grid) {
                     el = buildCard('<div class="dances__poster dances__poster--icon">' + ICON_FOLDER + '</div>', item.name, 'папка');
                     el.on('hover:enter', function () {
+                        nav.unbind();
                         Lampa.Activity.push({
                             url: '', title: item.name, component: 'dances_screen',
                             base: base, path: item.path || (path + '/' + item.name), page: 1
@@ -972,6 +987,7 @@
                 } else {
                     el = buildRow('<div class="dances__ico">' + ICON_FOLDER + '</div>', item.name, 'папка');
                     el.on('hover:enter', function () {
+                        nav.unbind();
                         Lampa.Activity.push({
                             url: '', title: item.name, component: 'dances_screen',
                             base: base, path: item.path || (path + '/' + item.name), page: 1
