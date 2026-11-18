@@ -34,7 +34,7 @@
     }
 
     function sortMode() { return setting(KEY_SORT, 'name'); }
-    function viewMode() { return setting(KEY_VIEW, 'grid'); }
+    function viewMode() { return setting(KEY_VIEW, 'list'); }
 
     function previewsOn() {
         var v = Lampa.Storage.field(KEY_PREVIEW);
@@ -210,12 +210,52 @@
         return el;
     }
 
-    // ---------- СВОЯ навигация: не зависит от Navigator ----------
-    function Nav(scroll, componentName) {
+    // ---------- свой скролл + своя навигация ----------
+    function Root() {
+        this.el = $('<div class="dances-scroll"></div>');
+        this.body = $('<div class="dances-scroll__body"></div>');
+        this.el.append(this.body);
+    }
+
+    Root.prototype.append = function (node) { this.body.append(node); };
+    Root.prototype.clear = function () { this.body.empty(); };
+    Root.prototype.render = function () { return this.el; };
+    Root.prototype.destroy = function () { this.el.remove(); };
+
+    Root.prototype.fit = function () {
+        try {
+            var node = this.el[0];
+            var parent = node.parentNode;
+            var h = (parent && parent.clientHeight) || 0;
+            if (h < 200) h = window.innerHeight || h;
+            if (h > 0) node.style.height = h + 'px';
+        } catch (e) { log('fit error', e); }
+    };
+
+    Root.prototype.scrollTo = function (jqEl) {
+        var node = jqEl && jqEl[0];
+        if (!node) return;
+
+        try {
+            node.scrollIntoView({ block: 'center', inline: 'nearest' });
+            return;
+        } catch (e) {}
+
+        try {
+            var box = this.el[0];
+            var top = node.offsetTop;
+            box.scrollTop = Math.max(0, top - box.clientHeight / 2 + node.offsetHeight / 2);
+        } catch (e2) { log('scroll error', e2); }
+    };
+
+    function Nav(root, componentName) {
         var self = this;
         var items = [];
         var idx = 0;
         var bound = false;
+
+        var keypadWorks = false;
+        try { keypadWorks = !!(Lampa.Keypad && Lampa.Keypad.listener && Lampa.Keypad.listener.follow); } catch (e) { keypadWorks = false; }
 
         function overlayOpen() {
             try { if (Lampa.Modal && Lampa.Modal.opened && Lampa.Modal.opened()) return true; } catch (e) {}
@@ -237,43 +277,23 @@
             try { return el[0].getBoundingClientRect(); } catch (e) { return { left: 0, top: 0, width: 0, height: 0 }; }
         }
 
-        function ensureVisible(el) {
-            try { if (scroll && scroll.update) scroll.update(el, true); } catch (e) {}
-            try {
-                var node = el[0];
-                if (node && node.scrollIntoView && rect(el).height === 0) node.scrollIntoView({ block: 'nearest' });
-            } catch (e) {}
-        }
-
         function applyFocus() {
             for (var i = 0; i < items.length; i++) {
                 if (i === idx) $(items[i]).addClass('dances--nav-focus');
                 else $(items[i]).removeClass('dances--nav-focus');
             }
-            if (items[idx]) ensureVisible($(items[idx]));
+
+            if (items[idx]) {
+                try { Lampa.Controller.focus($(items[idx])); } catch (e) {}
+                root.scrollTo($(items[idx]));
+            }
         }
 
         this.reset = function () { items = []; idx = 0; };
-
         this.count = function () { return items.length; };
-
         this.keypadAvailable = function () { return keypadWorks; };
-
-        this.add = function (el) {
-            items.push(el);
-            return el;
-        };
-
-        this.focusFirst = function () {
-            idx = 0;
-            applyFocus();
-        };
-
-        this.focusAt = function (i) {
-            if (!items.length) return;
-            idx = Math.max(0, Math.min(items.length - 1, i));
-            applyFocus();
-        };
+        this.add = function (el) { items.push(el); return el; };
+        this.focusFirst = function () { idx = 0; applyFocus(); };
 
         this.activate = function () {
             var el = items[idx];
@@ -314,13 +334,8 @@
                 if (ok && score < bestScore) { bestScore = score; best = i; }
             }
 
-            if (best >= 0) {
-                idx = best;
-                applyFocus();
-                return;
-            }
+            if (best >= 0) { idx = best; applyFocus(); return; }
 
-            // линейный запасной ход, если геометрия не помогла
             if (dir === 'down' || dir === 'right') {
                 if (idx < items.length - 1) { idx++; applyFocus(); }
             } else if (dir === 'up' || dir === 'left') {
@@ -338,9 +353,6 @@
             right: function () { if (isOurActivity()) { self.move('right'); return false; } },
             enter: function () { if (isOurActivity()) { self.activate(); return false; } }
         };
-
-        var keypadWorks = false;
-        try { keypadWorks = !!(Lampa.Keypad && Lampa.Keypad.listener && Lampa.Keypad.listener.follow); } catch (e) { keypadWorks = false; }
 
         this.bind = function () {
             if (bound || !keypadWorks) return;
@@ -365,8 +377,6 @@
         this.useController = function () {
             try {
                 if (keypadWorks) {
-                    // пульт обрабатываем сами; контроллер лишь забирает фокус,
-                    // чтобы встроенный Navigator не двигал элементы дважды
                     Lampa.Controller.add('content', {
                         toggle: function () { applyFocus(); },
                         left: function () {}, right: function () {},
@@ -379,10 +389,7 @@
                 }
 
                 Lampa.Controller.add('content', {
-                    toggle: function () {
-                        try { Lampa.Controller.collectionSet(scroll.render()); } catch (e) {}
-                        applyFocus();
-                    },
+                    toggle: function () { applyFocus(); },
                     left: function () { self.move('left'); },
                     right: function () { self.move('right'); },
                     up: function () { self.move('up'); },
@@ -430,9 +437,9 @@
     var searchState = { query: '', running: false };
 
     function DancesResultsScreen(object) {
-        var scroll = new Lampa.Scroll({ mask: true, over: true });
+        var root = new Root();
         var items = object.items || [];
-        var nav = new Nav(scroll, 'dances_results');
+        var nav = new Nav(root, 'dances_results');
 
         this.create = function () {
             var act = this.activity;
@@ -444,7 +451,7 @@
             }
 
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
-            if (grid) scroll.append(grid);
+            if (grid) root.append(grid);
 
             items.forEach(function (item, idx) {
                 var folder = dirOf(item.path);
@@ -463,7 +470,7 @@
                         : '<div class="dances__ico">' + ICON_PLAY + '</div>';
                     el = buildRow(left, item.name, humanSize(item.size) + ' • ' + folder);
                     el.on('hover:enter', function () { playList(items, idx); });
-                    scroll.append(el);
+                    root.append(el);
                 }
 
                 nav.add(el);
@@ -474,14 +481,17 @@
         };
 
         this.start = function () {
+            root.fit();
             nav.bind();
             nav.useController();
             nav.focusFirst();
+
+            setTimeout(function () { root.fit(); }, 300);
         };
 
         this.stop = function () { nav.unbind(); };
-        this.destroy = function () { nav.unbind(); scroll.destroy(); };
-        this.render = function () { return scroll.render(); };
+        this.destroy = function () { nav.unbind(); root.destroy(); };
+        this.render = function () { return root.render(); };
         this.empty = function () {
             try { this.activity.loader(false); this.activity.empty(); } catch (e) {}
         };
@@ -531,12 +541,12 @@
     var prefetched = {};
 
     function DancesScreen(object) {
-        var scroll = new Lampa.Scroll({ mask: true, over: true });
+        var root = new Root();
         var path = object.path || '/';
         var base = object.base || publicKey();
         var alive = true;
         var act = null;
-        var nav = new Nav(scroll, 'dances_screen');
+        var nav = new Nav(root, 'dances_screen');
 
         function loader(state) {
             try { if (act) act.loader(state); } catch (e) {}
@@ -571,11 +581,12 @@
             if (!dirs.length && !files.length) { emptyState(); return; }
 
             nav.reset();
+            root.clear();
 
             var action = function (icon, title, subtitle, onEnter) {
                 var el = buildRow('<div class="dances__ico">' + icon + '</div>', title, subtitle);
                 el.on('hover:enter', onEnter);
-                scroll.append(el);
+                root.append(el);
                 nav.add(el);
                 return el;
             };
@@ -599,21 +610,23 @@
                 try { ctrl = Lampa.Controller.enabled().name; } catch (e) {}
                 var comp = '?';
                 try { comp = Lampa.Activity.active().component; } catch (e) {}
+                var scrolled = '?';
+                try { scrolled = Math.round(root.el[0].scrollTop) + '/' + root.el[0].scrollHeight; } catch (e) {}
                 Lampa.Noty.show(
                     'Keypad: ' + (nav.keypadAvailable() ? 'да' : 'нет') +
                     ' • фокус: ' + ctrl +
                     ' • экран: ' + comp +
-                    ' • элементов: ' + nav.count(),
+                    ' • элементов: ' + nav.count() +
+                    ' • скролл: ' + scrolled,
                     { time: 8000 }
                 );
-                log('diagnostics', { keypad: nav.keypadAvailable(), ctrl: ctrl, comp: comp, items: nav.count() });
             });
 
             if (fromCache) {
                 action(ICON_REFRESH, 'Обновить список', 'сейчас показан кэш', function () {
                     cacheClear();
-                    try { if (typeof scroll.clear === 'function') scroll.clear(); } catch (e) {}
                     nav.reset();
+                    root.clear();
                     load(false);
                     Lampa.Noty.show('Обновляю список');
                 });
@@ -627,7 +640,7 @@
             }
 
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
-            if (grid) scroll.append(grid);
+            if (grid) root.append(grid);
 
             dirs.forEach(function (item) {
                 var el;
@@ -649,7 +662,7 @@
                             base: base, path: item.path || (path + '/' + item.name), page: 1
                         });
                     });
-                    scroll.append(el);
+                    root.append(el);
                 }
 
                 nav.add(el);
@@ -671,7 +684,7 @@
                         : '<div class="dances__ico">' + ICON_PLAY + '</div>';
                     el = buildRow(left, item.name, humanSize(item.size));
                     el.on('hover:enter', function () { playList(files, idx); });
-                    scroll.append(el);
+                    root.append(el);
                 }
 
                 nav.add(el);
@@ -706,9 +719,12 @@
         };
 
         this.start = function () {
+            root.fit();
             nav.bind();
             nav.useController();
             nav.focusFirst();
+
+            setTimeout(function () { root.fit(); }, 300);
         };
 
         this.stop = function () { nav.unbind(); };
@@ -716,16 +732,18 @@
         this.destroy = function () {
             alive = false;
             nav.unbind();
-            scroll.destroy();
+            root.destroy();
         };
 
-        this.render = function () { return scroll.render(); };
+        this.render = function () { return root.render(); };
         this.empty = function () { emptyState(); };
     }
 
     // ---------- init ----------
     function init() {
         Lampa.Template.add('dances_css', '<style>' +
+            '.dances-scroll{position:relative;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;outline:none}' +
+            '.dances-scroll__body{padding:.4em .2em 8em}' +
             '.dances__row{display:flex;align-items:center;gap:.9em;padding:.6em 1em;margin:.32em .5em;border-radius:.7em;background:rgba(255,255,255,.05);transition:background .15s ease,transform .15s ease}' +
             '.dances__row--focus,.dances__row.dances--nav-focus{background:rgba(255,255,255,.19);transform:scale(1.012)}' +
             '.dances__left{flex:0 0 auto;display:flex;align-items:center;justify-content:center;min-width:104px}' +
@@ -763,8 +781,8 @@
 
         Lampa.SettingsApi.addParam({
             component: 'dances',
-            param: { name: KEY_VIEW, type: 'select', values: 'grid,list', default: 'list' },
-            field: { name: 'Вид', description: 'grid — карточки, list — строки' }
+            param: { name: KEY_VIEW, type: 'select', values: 'list,grid', default: 'list' },
+            field: { name: 'Вид', description: 'list — строки, grid — карточки' }
         });
 
         Lampa.SettingsApi.addParam({
@@ -798,7 +816,7 @@
         });
 
         $('.menu .menu__list').eq(0).append(btn);
-        log('initialized v5, view:', viewMode());
+        log('initialized v6, view:', viewMode());
     }
 
     if (window.appready) init();
