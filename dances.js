@@ -4,6 +4,7 @@
     if (window.dances_plugin_ready) return;
     window.dances_plugin_ready = true;
 
+    var PLUGIN_VERSION = 'v12';
     var KEY_URL = 'dances_public_url';
     var KEY_SORT = 'dances_sort';
     var KEY_PREVIEW = 'dances_preview';
@@ -34,7 +35,7 @@
     function sourcesGet() {
         try {
             var raw = Lampa.Storage.get(KEY_SOURCES, null);
-            if (raw && raw.length) return raw;
+            if (raw && Array.isArray(raw) && raw.length) return raw;
         } catch (e) {}
 
         var legacy = String(setting(KEY_URL, '') || '').trim();
@@ -71,6 +72,7 @@
             try { Lampa.Controller.toggle('content'); } catch (e) {}
 
             var url = String(value || '').trim();
+            if (!url) return;
 
             if (!/^https?:\/\//i.test(url)) {
                 Lampa.Noty.show('Нужна ссылка вида https://disk.yandex.ru/d/...', { style: 'error' });
@@ -157,7 +159,13 @@
     }
 
     function natCmp(a, b) {
-        return String(a).localeCompare(String(b), 'ru', { numeric: true, sensitivity: 'base' });
+        try {
+            return String(a).localeCompare(String(b), 'ru', { numeric: true, sensitivity: 'base' });
+        } catch (e) {
+            a = String(a).toLowerCase();
+            b = String(b).toLowerCase();
+            return a < b ? -1 : (a > b ? 1 : 0);
+        }
     }
 
     function dirOf(path) {
@@ -319,7 +327,7 @@
     Root.prototype.fit = function () {
         try {
             var node = this.el[0];
-            var parent = node.parentNode;
+            var parent = node && node.parentNode;
             var h = (parent && parent.clientHeight) || 0;
             if (h < 200) h = window.innerHeight || h;
             if (h > 0) node.style.height = h + 'px';
@@ -347,6 +355,7 @@
         var items = [];
         var idx = 0;
         var bound = false;
+        var prevFocused = null;
 
         var keypadWorks = false;
         try { keypadWorks = !!(Lampa.Keypad && Lampa.Keypad.listener && Lampa.Keypad.listener.follow); } catch (e) { keypadWorks = false; }
@@ -355,6 +364,11 @@
             try { if (Lampa.Modal && Lampa.Modal.opened && Lampa.Modal.opened()) return true; } catch (e) {}
             try { if (Lampa.Select && Lampa.Select.opened && Lampa.Select.opened()) return true; } catch (e) {}
             try { if (Lampa.Player && Lampa.Player.opened && Lampa.Player.opened()) return true; } catch (e) {}
+            try { if (Lampa.Input && Lampa.Input.opened && Lampa.Input.opened()) return true; } catch (e) {}
+            try {
+                var el = document.activeElement;
+                if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return true;
+            } catch (e) {}
             return false;
         }
 
@@ -362,6 +376,12 @@
             try {
                 var a = Lampa.Activity.active();
                 if (!a || a.component !== componentName) return false;
+
+                // фокус должен быть именно на нашем контенте: если он ушёл
+                // в боковое меню или в клавиатуру — не трогаем список
+                var c = Lampa.Controller.enabled();
+                if (c && c.name && c.name !== 'content') return false;
+
                 if (overlayOpen()) return false;
                 return true;
             } catch (e) { return false; }
@@ -372,15 +392,25 @@
         }
 
         function applyFocus() {
-            for (var i = 0; i < items.length; i++) {
-                if (i === idx) $(items[i]).addClass('dances--nav-focus');
-                else $(items[i]).removeClass('dances--nav-focus');
+            if (prevFocused && (!items[idx] || prevFocused !== items[idx])) {
+                $(prevFocused).removeClass('dances--nav-focus');
+                prevFocused = null;
             }
 
-            if (items[idx]) root.scrollTo($(items[idx]));
+            if (items[idx]) {
+                $(items[idx]).addClass('dances--nav-focus');
+                prevFocused = items[idx];
+                root.scrollTo($(items[idx]));
+            }
         }
 
-        this.reset = function () { items = []; idx = 0; };
+        this.reset = function () {
+            if (prevFocused) $(prevFocused).removeClass('dances--nav-focus');
+            prevFocused = null;
+            items = [];
+            idx = 0;
+        };
+
         this.count = function () { return items.length; };
         this.keypadAvailable = function () { return keypadWorks; };
         this.add = function (el) { items.push(el); return el; };
@@ -435,12 +465,22 @@
 
             if (best >= 0) { idx = best; applyFocus(); return; }
 
-            if (dir === 'down' || dir === 'right') {
+            // Если пространственно перейти некуда:
+            if (dir === 'left') {
+                // Если слева ничего нет — открываем боковое меню Lampa
+                try { Lampa.Controller.toggle('menu'); } catch (e) {}
+                return;
+            }
+
+            if (dir === 'down') {
                 if (idx < items.length - 1) { idx++; applyFocus(); }
-            } else if (dir === 'up' || dir === 'left') {
+            } else if (dir === 'up') {
                 if (idx > 0) { idx--; applyFocus(); }
-                else if (dir === 'left') {
-                    try { Lampa.Controller.toggle('menu'); } catch (e) {}
+            } else if (dir === 'right') {
+                // В сетке переход в начало следующей строки, в списке — остаемся на месте
+                if (viewMode() === 'grid' && idx < items.length - 1) {
+                    idx++;
+                    applyFocus();
                 }
             }
         };
@@ -512,6 +552,8 @@
     var KEY_POS = 'dances_pos_';
     var pendingSeek = 0;
     var currentUrl = '';
+    var currentKey = '';
+    var lastPosSave = 0;
 
     function hashStr(s) {
         var h = 0;
@@ -520,9 +562,19 @@
         return Math.abs(h).toString(36);
     }
 
-    function posGet(url) {
+    function fileKey(item) {
+        if (!item) return '';
+        if (typeof item === 'string') return item;
+        if (item.resource_id) return 'res_' + item.resource_id;
+        var p = item.path || item.name || '';
+        return 'path_' + (item.base || publicKey()) + ':' + p;
+    }
+
+    function posGet(item) {
+        var key = fileKey(item);
+        if (!key) return null;
         try {
-            var raw = Lampa.Storage.get(KEY_POS + hashStr(url), null);
+            var raw = Lampa.Storage.get(KEY_POS + hashStr(key), null);
             if (!raw || !raw.ts) return null;
             if (raw.t < 20) return null;
             if (raw.dur && raw.t > raw.dur - 25) return null;
@@ -530,16 +582,33 @@
         } catch (e) { return null; }
     }
 
-    function posSet(url, t, dur) {
+    function posSet(key, t, dur, force) {
+        if (!key) return;
         try {
-            var key = KEY_POS + hashStr(url);
-            Lampa.Storage.set(key, { t: Math.round(t), dur: Math.round(dur || 0), ts: Date.now() });
+            var now = Date.now();
+            if (!force && now - lastPosSave < 5000) return;
+            lastPosSave = now;
+
+            var k = KEY_POS + hashStr(key);
+            Lampa.Storage.set(k, { t: Math.round(t), dur: Math.round(dur || 0), ts: now });
 
             var keys = Lampa.Storage.get('dances_pos_keys', []) || [];
-            if (keys.indexOf(key) < 0) {
-                keys.push(key);
+            if (keys.indexOf(k) < 0) {
+                keys.push(k);
+                if (keys.length > 200) {
+                    var drop = keys.shift();
+                    Lampa.Storage.set(drop, null);
+                }
                 Lampa.Storage.set('dances_pos_keys', keys);
             }
+        } catch (e) {}
+    }
+
+    function posRemove(key) {
+        if (!key) return;
+        try {
+            var k = KEY_POS + hashStr(key);
+            Lampa.Storage.set(k, null);
         } catch (e) {}
     }
 
@@ -553,9 +622,10 @@
 
     function fmtTime(sec) {
         sec = Math.max(0, Math.round(sec));
-        var m = Math.floor(sec / 60);
+        var h = Math.floor(sec / 3600);
+        var m = Math.floor((sec % 3600) / 60);
         var s = sec % 60;
-        return m + ':' + (s < 10 ? '0' : '') + s;
+        return (h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (s < 10 ? '0' : '') + s;
     }
 
     function autoNextOn() {
@@ -566,9 +636,14 @@
     function playExact(item, startAt) {
         lastPlayed = item.name;
         currentUrl = item.file || '';
+        currentKey = fileKey(item);
         pendingSeek = startAt || 0;
-        log('play exact', item.name, 'seek=', pendingSeek);
-        Lampa.Player.play({ title: item.name, url: item.file });
+        log('play exact', item.name, 'key=', currentKey, 'seek=', pendingSeek);
+        Lampa.Player.play({
+            title: item.name,
+            url: item.file,
+            timeline: startAt ? { time: startAt } : undefined
+        });
     }
 
     function playList(items, index) {
@@ -590,7 +665,7 @@
         queue.idx = playable.indexOf(item);
         if (queue.idx < 0) queue.idx = 0;
 
-        var saved = posGet(item.file);
+        var saved = posGet(item);
 
         if (saved && Lampa.Select && Lampa.Select.show) {
             Lampa.Select.show({
@@ -602,6 +677,9 @@
                 onSelect: function (choice) {
                     try { Lampa.Select.close(); } catch (e) {}
                     try { Lampa.Controller.toggle('content'); } catch (e) {}
+                    if (choice.seek === 0) {
+                        posRemove(fileKey(item));
+                    }
                     playExact(item, choice.seek || 0);
                 },
                 onBack: function () {
@@ -644,7 +722,7 @@
     }
 
     // ---------- поиск ----------
-    var searchState = { query: '', running: false };
+    var searchState = { query: '', running: false, seq: 0 };
 
     function DancesResultsScreen(object) {
         var root = new Root();
@@ -655,8 +733,7 @@
             var act = this.activity;
 
             if (!items.length) {
-                act.loader(false);
-                act.empty();
+                try { if (act) { act.loader(false); act.empty(); } } catch (e) {}
                 return this.render();
             }
 
@@ -669,14 +746,14 @@
 
                 if (grid) {
                     var poster = (previewsOn() && item.preview)
-                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" /></div>'
+                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" onerror="this.style.display=\'none\'" /></div>'
                         : '<div class="dances__poster dances__poster--icon">' + ICON_PLAY + '</div>';
                     el = buildCard(poster, item.name, humanSize(item.size) + ' • ' + folder);
                     el.on('hover:enter', function () { playList(items, idx); });
                     grid.append(el);
                 } else {
                     var left = (previewsOn() && item.preview)
-                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" onerror="this.style.display=\'none\'" />'
                         : '<div class="dances__ico">' + ICON_PLAY + '</div>';
                     el = buildRow(left, item.name, humanSize(item.size) + ' • ' + folder);
                     el.on('hover:enter', function () { playList(items, idx); });
@@ -703,7 +780,7 @@
         this.destroy = function () { nav.unbind(); root.destroy(); };
         this.render = function () { return root.render(); };
         this.empty = function () {
-            try { this.activity.loader(false); this.activity.empty(); } catch (e) {}
+            try { if (this.activity) { this.activity.loader(false); this.activity.empty(); } } catch (e) {}
         };
     }
 
@@ -721,6 +798,7 @@
             try { Lampa.Controller.toggle('content'); } catch (e) {}
 
             var q = String(value || '').trim();
+            if (!q) return;
 
             if (q.length < 2) {
                 Lampa.Noty.show('Введите хотя бы 2 символа');
@@ -729,11 +807,13 @@
 
             searchState.query = q;
             searchState.running = true;
+            var curSeq = ++searchState.seq;
             Lampa.Noty.show('Ищу «' + q + '» по всем папкам…');
 
             var acc = [];
 
             walkTree(base, '/', q.toLowerCase(), MAX_DEPTH, SEARCH_LIMIT, acc, function () {
+                if (curSeq !== searchState.seq) return;
                 searchState.running = false;
 
                 if (!acc.length) {
@@ -750,8 +830,6 @@
     }
 
     // ---------- экран списка ----------
-    var prefetched = {};
-
     function DancesScreen(object) {
         var root = new Root();
         var path = object.path || '/';
@@ -817,15 +895,21 @@
             tool(ICON_FOLDER, 'Источники', function () {
                 openSources(function () {
                     base = publicKey();
+                    path = '/';
                     cacheClear();
                     nav.reset();
                     root.clear();
+                    try { if (act && act.title) act.title(currentSource().n); } catch (e) {}
                     load(false);
                 });
             });
 
             if (files.length > 1) {
-                tool(ICON_PLAY, 'Все', function () { playList(files, 0); });
+                tool(ICON_PLAY, 'Все', function () {
+                    var first = files.filter(function (f) { return !!f.file; })[0];
+                    if (first) playList(files, files.indexOf(first));
+                    else Lampa.Noty.show('Нет доступных видео', { style: 'error' });
+                });
             }
 
             if (fromCache) {
@@ -851,7 +935,7 @@
                 var scrolled = '?';
                 try { scrolled = Math.round(root.el[0].scrollTop) + '/' + root.el[0].scrollHeight; } catch (e) {}
                 Lampa.Noty.show(
-                    'Keypad: ' + (nav.keypadAvailable() ? 'да' : 'нет') +
+                    'Танцы ' + PLUGIN_VERSION + ' • Keypad: ' + (nav.keypadAvailable() ? 'да' : 'нет') +
                     ' • фокус: ' + ctrl +
                     ' • экран: ' + comp +
                     ' • элементов: ' + nav.count() +
@@ -904,14 +988,14 @@
 
                 if (grid) {
                     var poster = (previewsOn() && item.preview)
-                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" /></div>'
+                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" onerror="this.style.display=\'none\'" /></div>'
                         : '<div class="dances__poster dances__poster--icon">' + ICON_PLAY + '</div>';
                     el = buildCard(poster, item.name, humanSize(item.size));
                     el.on('hover:enter', function () { playList(files, idx); });
                     grid.append(el);
                 } else {
                     var left = (previewsOn() && item.preview)
-                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" onerror="this.style.display=\'none\'" />'
                         : '<div class="dances__ico">' + ICON_PLAY + '</div>';
                     el = buildRow(left, item.name, humanSize(item.size));
                     el.on('hover:enter', function () { playList(files, idx); });
@@ -972,9 +1056,7 @@
 
     // ---------- init ----------
     function bindAutoNext() {
-        // PlayerVideo пересоздаётся при каждом открытии плеера,
-        // поэтому подписываемся заново, если модуль сменился
-        var boundTo = null;
+        var currentCleanup = null;
 
         try {
             Lampa.Player.listener.follow('start', function (data) {
@@ -987,37 +1069,63 @@
                 if (!current || !data || data.title !== current.name) {
                     queue.items = [];
                     queue.idx = -1;
+                    if (currentCleanup) { currentCleanup(); currentCleanup = null; }
                     return;
                 }
 
-                if (boundTo === Lampa.PlayerVideo) return;
+                if (currentCleanup) {
+                    currentCleanup();
+                    currentCleanup = null;
+                }
 
                 var module = Lampa.PlayerVideo;
-                var onEnded = function () { playNextFromQueue(); };
+                if (!module || !module.listener) return;
+
+                var onEnded = function () {
+                    if (currentKey) posRemove(currentKey);
+                    playNextFromQueue();
+                };
 
                 try { module.listener.follow('ended', onEnded); } catch (e) { return; }
-                boundTo = module;
 
                 var seeked = !pendingSeek;
                 var onTime = function (e) {
                     try {
                         if (!seeked && pendingSeek > 0) {
-                            var video = module.video;
-                            if (video && video.currentTime !== undefined) {
-                                video.currentTime = pendingSeek;
-                                seeked = true;
-                                pendingSeek = 0;
+                            var v = module.video;
+                            if (v && (v.readyState >= 1 || (e && e.current > 0))) {
+                                try {
+                                    if (typeof module.to === 'function') module.to(pendingSeek);
+                                    else v.currentTime = pendingSeek;
+                                    seeked = true;
+                                    pendingSeek = 0;
+                                } catch (seekErr) {}
                             }
                         }
 
-                        if (currentUrl && e && e.current > 10) posSet(currentUrl, e.current, e.duration);
+                        if (currentKey && e && e.current > 10) {
+                            posSet(currentKey, e.current, e.duration);
+                        }
                     } catch (err) {}
                 };
 
                 try { module.listener.follow('timeupdate', onTime); } catch (e) {}
 
                 var onDestroy = function () {
-                    if (boundTo === module) boundTo = null;
+                    if (currentCleanup) {
+                        currentCleanup();
+                        currentCleanup = null;
+                    }
+                };
+
+                currentCleanup = function () {
+                    try {
+                        var v = module.video;
+                        if (currentKey && v && v.currentTime > 10 && !v.ended && (!v.duration || v.currentTime < v.duration - 20)) {
+                            posSet(currentKey, v.currentTime, v.duration, true);
+                        }
+                    } catch (e) {}
+
                     try { module.listener.remove('ended', onEnded); } catch (e) {}
                     try { module.listener.remove('timeupdate', onTime); } catch (e) {}
                     try { Lampa.Player.listener.remove('destroy', onDestroy); } catch (e) {}
@@ -1052,7 +1160,7 @@
             '.dances__card--focus,.dances__card.dances--nav-focus{background:rgba(255,255,255,.2);transform:scale(1.03)}' +
             '.dances__poster{position:relative;width:100%;padding-top:56.25%;background:#000;overflow:hidden}' +
             '.dances__poster img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;display:block}' +
-            '.dances__poster--icon{display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.85)}' +
+            '.dances__poster--icon{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.85)}' +
             '.dances__card-body{padding:.45em .6em .6em}' +
             '.dances__card-title{font-size:.95em;line-height:1.25;max-height:2.5em;overflow:hidden}' +
             '.dances__card-sub{font-size:.8em;opacity:.55;margin-top:.2em}' +
@@ -1098,8 +1206,9 @@
             field: { name: 'Следующее видео само', description: 'Включать следующее в папке после окончания текущего' }
         });
 
+        $('.menu .menu__list .dances-menu-item').remove();
         var btn = $(
-            '<li class="menu__item selector">' +
+            '<li class="menu__item selector dances-menu-item">' +
                 '<div class="menu__ico">' +
                     '<svg viewBox="0 0 24 24" fill="currentColor">' +
                         '<path d="M12 2.2a2.1 2.1 0 0 0-2.1 2.1c0 .5.2 1 .5 1.3l-3.1 8.1a1 1 0 0 0 .9 1.3h.4l1.6-4.2 1 2.6a3 3 0 1 0 3.3 2.9V8.9l2.6-1.5a1 1 0 0 0-.9-1.8l-1.7 1V4.3A2.1 2.1 0 0 0 12 2.2zm0 13.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/>' +
@@ -1117,7 +1226,7 @@
         });
 
         $('.menu .menu__list').eq(0).append(btn);
-        log('initialized v6, view:', viewMode());
+        log('initialized ' + PLUGIN_VERSION + ', view:', viewMode());
     }
 
     if (window.appready) init();
