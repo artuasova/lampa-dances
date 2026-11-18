@@ -7,25 +7,34 @@
     var KEY_URL = 'dances_public_url';
     var KEY_SORT = 'dances_sort';
     var KEY_PREVIEW = 'dances_preview';
+    var KEY_VIEW = 'dances_view';
     var KEY_CACHE = 'dances_cache_';
     var KEY_KEYS = 'dances_cache_keys';
+    var KEY_INDEX = 'dances_index_';
 
     var DEFAULT_URL = 'https://disk.yandex.ru/d/L4PW93XuLMuu3A';
     var API = 'https://cloud-api.yandex.net/v1/disk/public/resources';
     var CACHE_TTL = 10 * 60 * 1000;
     var SEARCH_LIMIT = 300;
-    var SEARCH_DEPTH = 6;
+    var INDEX_LIMIT = 6000;
+    var MAX_DEPTH = 6;
 
     function log() {
         try { console.log.apply(console, ['[Dances]'].concat([].slice.call(arguments))); } catch (e) {}
     }
 
-    function publicKey() {
-        var saved = Lampa.Storage.field(KEY_URL);
-        return (saved && saved.trim()) || DEFAULT_URL;
+    function setting(name, def) {
+        var v = Lampa.Storage.field(name);
+        return (v === undefined || v === null || v === '') ? def : v;
     }
 
-    function sortMode() { return Lampa.Storage.field(KEY_SORT) || 'name'; }
+    function publicKey() {
+        var saved = setting(KEY_URL, '');
+        return String(saved || '').trim() || DEFAULT_URL;
+    }
+
+    function sortMode() { return setting(KEY_SORT, 'name'); }
+    function viewMode() { return setting(KEY_VIEW, 'grid'); }
 
     function previewsOn() {
         var v = Lampa.Storage.field(KEY_PREVIEW);
@@ -110,6 +119,54 @@
         }, function () { cb([], false); });
     }
 
+    // ---------- обход дерева ----------
+    function walkTree(base, path, query, depth, limit, acc, done) {
+        if (acc.length >= limit) { done(); return; }
+
+        fetchList(base, path, function (items) {
+            var dirs = [];
+            var i, it;
+
+            for (i = 0; i < items.length; i++) {
+                it = items[i];
+                if (it.type === 'dir') {
+                    dirs.push(it);
+                } else if (it.type === 'file' && isVideo(it.name)) {
+                    if (!query || String(it.name).toLowerCase().indexOf(query) >= 0) {
+                        if (acc.length < limit) acc.push(it);
+                    }
+                }
+            }
+
+            if (depth <= 0 || !dirs.length) { done(); return; }
+
+            var n = 0;
+
+            (function nextDir() {
+                if (n >= dirs.length || acc.length >= limit) { done(); return; }
+                walkTree(base, dirs[n++].path, query, depth - 1, limit, acc, nextDir);
+            })();
+        });
+    }
+
+    function collectIndex(base, cb) {
+        var key = KEY_INDEX + base;
+
+        try {
+            var raw = Lampa.Storage.get(KEY_CACHE + key, null);
+            if (raw && raw.ts && raw.items && (Date.now() - raw.ts) < CACHE_TTL) {
+                cb(raw.items);
+                return;
+            }
+        } catch (e) {}
+
+        var acc = [];
+        walkTree(base, '/', null, MAX_DEPTH, INDEX_LIMIT, acc, function () {
+            try { Lampa.Storage.set(KEY_CACHE + key, { ts: Date.now(), items: acc }); } catch (e) {}
+            cb(acc);
+        });
+    }
+
     // ---------- безопасные обёртки ----------
     function canmove(dir) {
         try { return Navigator.canmove(dir); } catch (e) { return false; }
@@ -123,6 +180,7 @@
     var ICON_BACK = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>';
     var ICON_REFRESH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>';
     var ICON_SEARCH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>';
+    var ICON_SHUFFLE = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M17 3l4 4-4 4V8h-2.2l-1.6 1.9-1.3-1.6L13.9 6H17V3zM3 7h4.1l2.5 3-2.5 3H3V7zm14 6l4 4-4 4v-3h-3.1l-2.2-2.7 1.3-1.6 1.6 1.9H17v-2.6zM3 11h4.1l2.5 3-2.5 3H3v-6z"/></svg>';
 
     function buildRow(leftHtml, title, subtitle) {
         var el = $(
@@ -137,6 +195,23 @@
 
         el.on('hover:focus', function () { el.addClass('dances__row--focus'); });
         el.on('hover:blur', function () { el.removeClass('dances__row--focus'); });
+
+        return el;
+    }
+
+    function buildCard(innerHtml, title, subtitle) {
+        var el = $(
+            '<div class="selector dances__card">' +
+                innerHtml +
+                '<div class="dances__card-body">' +
+                    '<div class="dances__card-title">' + esc(title) + '</div>' +
+                    (subtitle ? '<div class="dances__card-sub">' + esc(subtitle) + '</div>' : '') +
+                '</div>' +
+            '</div>'
+        );
+
+        el.on('hover:focus', function () { el.addClass('dances__card--focus'); });
+        el.on('hover:blur', function () { el.removeClass('dances__card--focus'); });
 
         return el;
     }
@@ -178,41 +253,30 @@
         Lampa.Player.play({ title: item.name, url: item.file });
     }
 
-    // ---------- поиск ----------
-    var searchState = { query: '', running: false };
+    // ---------- случайное видео ----------
+    function playRandom(base) {
+        Lampa.Noty.show('Собираю список видео…');
 
-    function searchWalk(base, path, query, depth, acc, done) {
-        if (acc.length >= SEARCH_LIMIT) { done(); return; }
+        collectIndex(base, function (files) {
+            var playable = files.filter(function (f) { return !!f.file; });
 
-        fetchList(base, path, function (items) {
-            var dirs = [];
-            var i;
-
-            for (i = 0; i < items.length; i++) {
-                var it = items[i];
-                if (it.type === 'dir') {
-                    dirs.push(it);
-                } else if (it.type === 'file' && isVideo(it.name) && String(it.name).toLowerCase().indexOf(query) >= 0) {
-                    if (acc.length < SEARCH_LIMIT) acc.push(it);
-                }
+            if (!playable.length) {
+                Lampa.Noty.show('Не нашёл ни одного видео', { style: 'error' });
+                return;
             }
 
-            if (depth <= 0 || !dirs.length) { done(); return; }
-
-            var n = 0;
-
-            (function nextDir() {
-                if (n >= dirs.length || acc.length >= SEARCH_LIMIT) { done(); return; }
-                var d = dirs[n++];
-                searchWalk(base, d.path, query, depth - 1, acc, nextDir);
-            })();
+            var idx = Math.floor(Math.random() * playable.length);
+            log('random', idx, 'of', playable.length);
+            playList(playable, idx);
         });
     }
+
+    // ---------- поиск ----------
+    var searchState = { query: '', running: false };
 
     function DancesResultsScreen(object) {
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var items = object.items || [];
-        var query = object.query || '';
         var last = false;
 
         this.create = function () {
@@ -224,24 +288,33 @@
                 return this.render();
             }
 
-            var total = 0;
+            var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
+            if (grid) scroll.append(grid);
 
             items.forEach(function (item, idx) {
-                var left = (previewsOn() && item.preview)
-                    ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
-                    : '<div class="dances__ico">' + ICON_PLAY + '</div>';
-
                 var folder = dirOf(item.path);
-                var el = buildRow(left, item.name, humanSize(item.size) + ' • ' + folder);
 
-                el.on('hover:focus', function () { last = el; });
-                el.on('hover:enter', function () { playList(items, idx); });
+                if (grid) {
+                    var poster = (previewsOn() && item.preview)
+                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" /></div>'
+                        : '<div class="dances__poster dances__poster--icon">' + ICON_PLAY + '</div>';
 
-                scroll.append(el);
-                total++;
+                    var card = buildCard(poster, item.name, humanSize(item.size) + ' • ' + folder);
+                    card.on('hover:focus', function () { last = card; });
+                    card.on('hover:enter', function () { playList(items, idx); });
+                    grid.append(card);
+                } else {
+                    var left = (previewsOn() && item.preview)
+                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                        : '<div class="dances__ico">' + ICON_PLAY + '</div>';
+
+                    var el = buildRow(left, item.name, humanSize(item.size) + ' • ' + folder);
+                    el.on('hover:focus', function () { last = el; });
+                    el.on('hover:enter', function () { playList(items, idx); });
+                    scroll.append(el);
+                }
             });
 
-            log('results rendered', total);
             return this.render();
         };
 
@@ -254,7 +327,7 @@
         };
     }
 
-    function runSearch(base, notify) {
+    function runSearch(base) {
         if (searchState.running) {
             Lampa.Noty.show('Поиск уже выполняется');
             return;
@@ -279,13 +352,12 @@
 
             searchState.query = q;
             searchState.running = true;
-            notify('Ищу «' + q + '» по всем папкам…');
+            Lampa.Noty.show('Ищу «' + q + '» по всем папкам…');
 
             var acc = [];
 
-            searchWalk(base, '/', q.toLowerCase(), SEARCH_DEPTH, acc, function () {
+            walkTree(base, '/', q.toLowerCase(), MAX_DEPTH, SEARCH_LIMIT, acc, function () {
                 searchState.running = false;
-                notify('');
 
                 if (!acc.length) {
                     Lampa.Noty.show('Ничего не найдено', { style: 'error' });
@@ -320,10 +392,6 @@
             try { if (act) act.empty(); } catch (e) {}
         }
 
-        function resetScroll() {
-            try { if (typeof scroll.clear === 'function') scroll.clear(); } catch (e) {}
-        }
-
         function sortItems(items) {
             var mode = sortMode();
             var dirs = items.filter(function (i) { return i.type === 'dir'; });
@@ -356,12 +424,13 @@
 
             var search = buildRow('<div class="dances__ico">' + ICON_SEARCH + '</div>', 'Поиск по всем папкам', 'нажми и введи название');
             search.on('hover:focus', function () { last = search; });
-            search.on('hover:enter', function () {
-                runSearch(base, function (msg) {
-                    if (msg) Lampa.Noty.show(msg);
-                });
-            });
+            search.on('hover:enter', function () { runSearch(base); });
             scroll.append(search);
+
+            var rnd = buildRow('<div class="dances__ico">' + ICON_SHUFFLE + '</div>', 'Случайное видео', 'из всех папок');
+            rnd.on('hover:focus', function () { last = rnd; });
+            rnd.on('hover:enter', function () { playRandom(base); });
+            scroll.append(rnd);
 
             var totalSize = files.reduce(function (s, f) { return s + (f.size || 0); }, 0);
 
@@ -370,7 +439,7 @@
                 ref.on('hover:focus', function () { last = ref; });
                 ref.on('hover:enter', function () {
                     cacheClear();
-                    resetScroll();
+                    try { if (typeof scroll.clear === 'function') scroll.clear(); } catch (e) {}
                     load(false);
                     Lampa.Noty.show('Обновляю список');
                     Lampa.Controller.toggle('content');
@@ -387,41 +456,59 @@
                 scroll.append(all);
             }
 
-            dirs.forEach(function (item) {
-                var el = buildRow('<div class="dances__ico">' + ICON_FOLDER + '</div>', item.name, 'папка');
+            var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
+            if (grid) scroll.append(grid);
 
-                el.on('hover:focus', function () {
-                    last = el;
-                    // предзагрузка содержимого папки, чтобы открывалась мгновенно
+            dirs.forEach(function (item) {
+                var open = function () {
+                    Lampa.Activity.push({
+                        url: '', title: item.name, component: 'dances_screen',
+                        base: base, path: item.path || (path + '/' + item.name), page: 1
+                    });
+                };
+
+                var prefetch = function () {
                     var key = listingKey(base, item.path);
                     if (!prefetched[key]) {
                         prefetched[key] = true;
                         fetchList(base, item.path, function () {});
                     }
-                });
+                };
 
-                el.on('hover:enter', function () {
-                    Lampa.Activity.push({
-                        url: '', title: item.name, component: 'dances_screen',
-                        base: base, path: item.path || (path + '/' + item.name), page: 1
-                    });
-                });
-
-                scroll.append(el);
+                if (grid) {
+                    var card = buildCard('<div class="dances__poster dances__poster--icon">' + ICON_FOLDER + '</div>', item.name, 'папка');
+                    card.on('hover:focus', function () { last = card; prefetch(); });
+                    card.on('hover:enter', open);
+                    grid.append(card);
+                } else {
+                    var el = buildRow('<div class="dances__ico">' + ICON_FOLDER + '</div>', item.name, 'папка');
+                    el.on('hover:focus', function () { last = el; prefetch(); });
+                    el.on('hover:enter', open);
+                    scroll.append(el);
+                }
             });
 
             files.forEach(function (item, idx) {
-                var left = (previewsOn() && item.preview)
-                    ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
-                    : '<div class="dances__ico">' + ICON_PLAY + '</div>';
+                if (grid) {
+                    var poster = (previewsOn() && item.preview)
+                        ? '<div class="dances__poster"><img src="' + item.preview + '" loading="lazy" /></div>'
+                        : '<div class="dances__poster dances__poster--icon">' + ICON_PLAY + '</div>';
 
-                var el = buildRow(left, item.name, humanSize(item.size));
-                el.on('hover:focus', function () { last = el; });
-                el.on('hover:enter', function () { playList(files, idx); });
-                scroll.append(el);
+                    var card = buildCard(poster, item.name, humanSize(item.size));
+                    card.on('hover:focus', function () { last = card; });
+                    card.on('hover:enter', function () { playList(files, idx); });
+                    grid.append(card);
+                } else {
+                    var left = (previewsOn() && item.preview)
+                        ? '<img class="dances__thumb" src="' + item.preview + '" loading="lazy" />'
+                        : '<div class="dances__ico">' + ICON_PLAY + '</div>';
+
+                    var el = buildRow(left, item.name, humanSize(item.size));
+                    el.on('hover:focus', function () { last = el; });
+                    el.on('hover:enter', function () { playList(files, idx); });
+                    scroll.append(el);
+                }
             });
-
-            log('painted', dirs.length, 'dirs', files.length, 'files');
         }
 
         function load(useCache) {
@@ -470,6 +557,15 @@
             '.dances__body{flex:1 1 auto;min-width:0}' +
             '.dances__title{font-size:1.02em;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             '.dances__sub{font-size:.82em;opacity:.55;margin-top:.15em}' +
+            '.dances__grid{display:flex;flex-wrap:wrap;padding:.4em .5em 1em}' +
+            '.dances__card{flex:0 0 23%;margin:0 .6% 1em;border-radius:.7em;overflow:hidden;background:rgba(255,255,255,.05);transition:background .15s ease,transform .15s ease}' +
+            '.dances__card--focus{background:rgba(255,255,255,.2);transform:scale(1.03)}' +
+            '.dances__poster{position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden}' +
+            '.dances__poster img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}' +
+            '.dances__poster--icon{display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.85)}' +
+            '.dances__card-body{padding:.45em .6em .6em}' +
+            '.dances__card-title{font-size:.95em;line-height:1.25;max-height:2.5em;overflow:hidden}' +
+            '.dances__card-sub{font-size:.8em;opacity:.55;margin-top:.2em}' +
             '</style>');
         $('body').append(Lampa.Template.get('dances_css', {}, true));
 
@@ -490,6 +586,12 @@
 
         Lampa.SettingsApi.addParam({
             component: 'dances',
+            param: { name: KEY_VIEW, type: 'select', values: 'grid,list', default: 'grid' },
+            field: { name: 'Вид', description: 'grid — карточки, list — строки' }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'dances',
             param: { name: KEY_SORT, type: 'select', values: 'name,date,size', default: 'name' },
             field: { name: 'Сортировка', description: 'name — по имени, date — по дате, size — по размеру' }
         });
@@ -497,7 +599,7 @@
         Lampa.SettingsApi.addParam({
             component: 'dances',
             param: { name: KEY_PREVIEW, type: 'trigger', default: true },
-            field: { name: 'Превью видео', description: 'Кадры из видео в списке' }
+            field: { name: 'Превью видео', description: 'Кадры из видео' }
         });
 
         var btn = $(
@@ -519,7 +621,7 @@
         });
 
         $('.menu .menu__list').eq(0).append(btn);
-        log('initialized');
+        log('initialized, view:', viewMode());
     }
 
     if (window.appready) init();
