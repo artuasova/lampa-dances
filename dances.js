@@ -240,6 +240,11 @@
 
         var btn = $(
             '<li class="menu__item selector">' +
+                '<div class="menu__ico">' +
+                    '<svg viewBox="0 0 24 24" fill="currentColor">' +
+                        '<path d="M12 2.2a2.1 2.1 0 0 0-2.1 2.1c0 .5.2 1 .5 1.3l-3.1 8.1a1 1 0 0 0 .9 1.3h.4l1.6-4.2 1 2.6a3 3 0 1 0 3.3 2.9V8.9l2.6-1.5a1 1 0 0 0-.9-1.8l-1.7 1V4.3A2.1 2.1 0 0 0 12 2.2zm0 13.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/>' +
+                    '</svg>' +
+                '</div>' +
                 '<div class="menu__text">Танцы</div>' +
             '</li>'
         );
