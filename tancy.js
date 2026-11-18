@@ -174,6 +174,7 @@
     var ICON_REFRESH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>';
     var ICON_SEARCH = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/></svg>';
     var ICON_SHUFFLE = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M17 3l4 4-4 4V8h-2.2l-1.6 1.9-1.3-1.6L13.9 6H17V3zM3 7h4.1l2.5 3-2.5 3H3V7zm14 6l4 4-4 4v-3h-3.1l-2.2-2.7 1.3-1.6 1.6 1.9H17v-2.6zM3 11h4.1l2.5 3-2.5 3H3v-6z"/></svg>';
+    var ICON_INFO = '<svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>';
 
     // ---------- элементы ----------
     function buildRow(leftHtml, title, subtitle) {
@@ -283,10 +284,7 @@
                 else $(items[i]).removeClass('dances--nav-focus');
             }
 
-            if (items[idx]) {
-                try { Lampa.Controller.focus($(items[idx])); } catch (e) {}
-                root.scrollTo($(items[idx]));
-            }
+            if (items[idx]) root.scrollTo($(items[idx]));
         }
 
         this.reset = function () { items = []; idx = 0; };
@@ -295,9 +293,16 @@
         this.add = function (el) { items.push(el); return el; };
         this.focusFirst = function () { idx = 0; applyFocus(); };
 
+        var lastActivate = 0;
+
         this.activate = function () {
             var el = items[idx];
             if (!el) return;
+
+            var now = Date.now();
+            if (now - lastActivate < 400) return;
+            lastActivate = now;
+
             try { $(el).trigger('hover:enter'); } catch (e) { log('activate error', e); }
         };
 
@@ -383,6 +388,12 @@
                         up: function () {}, down: function () {}, enter: function () {},
                         back: function () { Lampa.Activity.backward(); }
                     });
+
+                    // ключевое: у Lampa не должно остаться своей коллекции элементов,
+                    // иначе она сама активирует «свой» пункт — отсюда и левые видео
+                    try { Lampa.Controller.collectionSet($()); } catch (e) {}
+                    try { Lampa.Controller.clear(); } catch (e) {}
+
                     Lampa.Controller.toggle('content');
                     applyFocus();
                     return;
@@ -583,29 +594,42 @@
             nav.reset();
             root.clear();
 
-            var action = function (icon, title, subtitle, onEnter) {
-                var el = buildRow('<div class="dances__ico">' + icon + '</div>', title, subtitle);
+            var toolbar = $('<div class="dances__toolbar"></div>');
+            root.append(toolbar);
+
+            var tool = function (icon, label, onEnter) {
+                var el = $('<div class="selector dances__tool">' + icon +
+                    '<div class="dances__tool-label">' + esc(label) + '</div></div>');
                 el.on('hover:enter', onEnter);
-                root.append(el);
+                el.on('hover:focus', function () { el.addClass('dances__tool--focus'); });
+                el.on('hover:blur', function () { el.removeClass('dances__tool--focus'); });
+                toolbar.append(el);
                 nav.add(el);
                 return el;
             };
 
             if (path !== '/') {
-                action(ICON_BACK, 'Назад', 'на уровень выше', function () {
-                    Lampa.Activity.backward();
+                tool(ICON_BACK, 'Назад', function () { Lampa.Activity.backward(); });
+            }
+
+            tool(ICON_SEARCH, 'Поиск', function () { runSearch(base); });
+            tool(ICON_SHUFFLE, 'Случайно', function () { playRandom(base); });
+
+            if (files.length > 1) {
+                tool(ICON_PLAY, 'Все', function () { playList(files, 0); });
+            }
+
+            if (fromCache) {
+                tool(ICON_REFRESH, 'Обновить', function () {
+                    cacheClear();
+                    nav.reset();
+                    root.clear();
+                    load(false);
+                    Lampa.Noty.show('Обновляю список');
                 });
             }
 
-            action(ICON_SEARCH, 'Поиск по всем папкам', 'нажми и введи название', function () {
-                runSearch(base);
-            });
-
-            action(ICON_SHUFFLE, 'Случайное видео', 'из всех папок', function () {
-                playRandom(base);
-            });
-
-            action(ICON_REFRESH, 'Проверка пульта', 'нажми, если стрелки не работают', function () {
+            tool(ICON_INFO, 'Проверка', function () {
                 var ctrl = '?';
                 try { ctrl = Lampa.Controller.enabled().name; } catch (e) {}
                 var comp = '?';
@@ -621,23 +645,6 @@
                     { time: 8000 }
                 );
             });
-
-            if (fromCache) {
-                action(ICON_REFRESH, 'Обновить список', 'сейчас показан кэш', function () {
-                    cacheClear();
-                    nav.reset();
-                    root.clear();
-                    load(false);
-                    Lampa.Noty.show('Обновляю список');
-                });
-            }
-
-            if (files.length > 1) {
-                var sub = files.length + ' видео';
-                var totalSize = files.reduce(function (s, f) { return s + (f.size || 0); }, 0);
-                if (totalSize) sub += ' • ' + humanSize(totalSize);
-                action(ICON_PLAY, 'Смотреть всё', sub, function () { playList(files, 0); });
-            }
 
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
             if (grid) root.append(grid);
@@ -744,6 +751,11 @@
         Lampa.Template.add('dances_css', '<style>' +
             '.dances-scroll{position:relative;height:100%;max-height:100%;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;outline:none}' +
             '.dances-scroll__body{padding:.4em .2em 8em}' +
+            '.dances__toolbar{display:flex;flex-wrap:wrap;gap:.45em;padding:.45em .6em .15em}' +
+            '.dances__tool{width:5.4em;height:5.4em;border-radius:.7em;background:rgba(255,255,255,.07);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15em;transition:background .15s ease,transform .15s ease}' +
+            '.dances__tool--focus,.dances__tool.dances--nav-focus{background:rgba(255,255,255,.24);transform:scale(1.06)}' +
+            '.dances__tool svg{width:1.7em;height:1.7em;opacity:.9}' +
+            '.dances__tool-label{font-size:.62em;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:96%}' +
             '.dances__row{display:flex;align-items:center;gap:.9em;padding:.6em 1em;margin:.32em .5em;border-radius:.7em;background:rgba(255,255,255,.05);transition:background .15s ease,transform .15s ease}' +
             '.dances__row--focus,.dances__row.dances--nav-focus{background:rgba(255,255,255,.19);transform:scale(1.012)}' +
             '.dances__left{flex:0 0 auto;display:flex;align-items:center;justify-content:center;min-width:104px}' +
