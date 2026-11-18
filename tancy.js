@@ -494,6 +494,16 @@
                 return this.render();
             }
 
+            if (!dirs.length && !files.length) {
+                var empty = buildRow('<div class="dances__ico">' + ICON_INFO + '</div>',
+                    'В этой папке нет видео', 'пусто');
+                empty.on('hover:enter', function () { Lampa.Activity.backward(); });
+                root.append(empty);
+                nav.add(empty);
+                nav.focusFirst();
+                return;
+            }
+
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
             if (grid) root.append(grid);
 
@@ -552,6 +562,8 @@
             free: true,
             nosave: true
         }, function (value) {
+            try { Lampa.Controller.toggle('content'); } catch (e) {}
+
             var q = String(value || '').trim();
 
             if (q.length < 2) {
@@ -622,10 +634,9 @@
             var dirs = sorted.dirs;
             var files = sorted.files;
 
-            if (!dirs.length && !files.length) { emptyState(); return; }
-
             nav.reset();
             root.clear();
+            loader(false);
 
             var toolbar = $('<div class="dances__toolbar"></div>');
             root.append(toolbar);
@@ -678,6 +689,16 @@
                     { time: 8000 }
                 );
             });
+
+            if (!dirs.length && !files.length) {
+                var empty = buildRow('<div class="dances__ico">' + ICON_INFO + '</div>',
+                    'В этой папке нет видео', 'пусто');
+                empty.on('hover:enter', function () { Lampa.Activity.backward(); });
+                root.append(empty);
+                nav.add(empty);
+                nav.focusFirst();
+                return;
+            }
 
             var grid = viewMode() === 'grid' ? $('<div class="dances__grid"></div>') : null;
             if (grid) root.append(grid);
@@ -781,16 +802,35 @@
 
     // ---------- init ----------
     function bindAutoNext() {
+        // PlayerVideo пересоздаётся при каждом открытии плеера,
+        // поэтому подписываемся заново, если модуль сменился
+        var boundTo = null;
+
         try {
-            Lampa.Player.listener.follow('start', function () {
+            Lampa.Player.listener.follow('start', function (data) {
                 if (!queue.items.length) return;
 
+                var current = queue.items[queue.idx];
+
+                // страхуемся: автопереход работает только для своего файла,
+                // иначе он «доедал» чужие видео и включал лишнее
+                if (!current || !data || data.title !== current.name) {
+                    queue.items = [];
+                    queue.idx = -1;
+                    return;
+                }
+
+                if (boundTo === Lampa.PlayerVideo) return;
+
+                var module = Lampa.PlayerVideo;
                 var onEnded = function () { playNextFromQueue(); };
 
-                try { Lampa.PlayerVideo.listener.follow('ended', onEnded); } catch (e) { return; }
+                try { module.listener.follow('ended', onEnded); } catch (e) { return; }
+                boundTo = module;
 
                 var onDestroy = function () {
-                    try { Lampa.PlayerVideo.listener.remove('ended', onEnded); } catch (e) {}
+                    if (boundTo === module) boundTo = null;
+                    try { module.listener.remove('ended', onEnded); } catch (e) {}
                     try { Lampa.Player.listener.remove('destroy', onDestroy); } catch (e) {}
                 };
 
